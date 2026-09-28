@@ -113,6 +113,24 @@ below the token's face value. The issuer validates the **face value**
 against the pack and absorbs the fee; the credited amount is recorded in
 `grants.jsonl`.
 
+## `bpir-cln-rpc-guard` (workspace member `cln-rpc-guard/`)
+
+The issuer never opens the Core Lightning socket. For x402 (`exact/lnbtc`)
+it needs three node calls, `invoice`, `listinvoices`, and `waitinvoice`, and it
+gets exactly those through `bpir-cln-rpc-guard`: a proxy that runs in the node
+socket's group, exposes a second Unix socket to the issuer's group, forwards a
+request unchanged only if its method and named parameters pass the allowlist,
+and answers everything else itself with a JSON-RPC error. Bounds (flags):
+label prefix (default `bpir-x402-`, also required on the read calls, so the
+mint's invoices stay out of reach), `amount_msat` range, `expiry` maximum,
+`description` size, `deschashonly` must be `true` (description-hash invoices
+only, no `preimage`, no `fallbacks`), `listinvoices` needs exactly one of
+`label` / `payment_hash` / `invstring` (no unfiltered listing), an invoice rate
+limit per minute, and a connection cap. Responses are copied back byte for byte.
+Unit: `deploy/bpir-cln-rpc-guard.service` (`User=` its own account,
+`SupplementaryGroups=` the node socket's group, `Group=` the issuer's group,
+`UMask=0007`, socket `/run/bpir-cln-rpc-guard/rpc.sock`).
+
 ## Layout
 
 ```

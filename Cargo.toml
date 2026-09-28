@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "cln-rpc-guard"]
+default-members = [".", "cln-rpc-guard"]
+
 [package]
 name = "bpir-issuer"
 version = "0.1.0"
