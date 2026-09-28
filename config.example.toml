@@ -1,15 +1,15 @@
-# bpir-cashier configuration. Copy to /etc/bitcoinpir/cashier/config.toml.
+# bpir-issuer configuration. Copy to /etc/bitcoinpir/issuer/config.toml.
 listen = "127.0.0.1:8095"
 
-# 32-byte Ed25519 issuer seed from `bpir-cashier keygen`: signs every
+# 32-byte Ed25519 issuer seed from `bpir-issuer keygen`: signs every
 # POST /v2/redeem answer; PIR servers pin its public key with
 # --credit-issuer-pubkey. (The key name predates credits.)
-grant_key_path = "/etc/bitcoinpir/cashier/grant.key"
-# 64-byte seed from `bpir-cashier wallet-seed`. Back it up: it recovers the ecash.
-wallet_seed_path = "/etc/bitcoinpir/cashier/wallet.seed"
-wallet_db_path = "/var/lib/bitcoinpir-cashier/wallet.sqlite"
+grant_key_path = "/etc/bitcoinpir/issuer/grant.key"
+# 64-byte seed from `bpir-issuer wallet-seed`. Back it up: it recovers the ecash.
+wallet_seed_path = "/etc/bitcoinpir/issuer/wallet.seed"
+wallet_db_path = "/var/lib/bitcoinpir-issuer/wallet.sqlite"
 # Append-only audit/idempotency log.
-store_path = "/var/lib/bitcoinpir-cashier/grants.jsonl"
+store_path = "/var/lib/bitcoinpir-issuer/grants.jsonl"
 
 # Mints whose ecash is accepted; the browser buys from the first one.
 mints = ["https://mint.example"]
@@ -31,14 +31,14 @@ operator_pubkeys = []
 # Tolerated clock difference of a redeem request (seconds).
 redeem_max_skew_secs = 300
 # Redemption log (replay index + settlement ledger); default: redeem.jsonl next to store_path.
-# redeem_store_path = "/var/lib/bitcoinpir-cashier/redeem.jsonl"
+# redeem_store_path = "/var/lib/bitcoinpir-issuer/redeem.jsonl"
 
 # ARC credentials (docs/CREDITS.md): one credential = presentation_limit
 # presentations, one credit each. Omit the whole table to sell none.
 [arc]
-# 32-byte master seed from `bpir-cashier arc-seed`; every epoch's issuer keys
+# 32-byte master seed from `bpir-issuer arc-seed`; every epoch's issuer keys
 # derive from it. Back it up: it is the credentials.
-seed_path = "/etc/bitcoinpir/cashier/arc.seed"
+seed_path = "/etc/bitcoinpir/issuer/arc.seed"
 epoch_secs = 7776000        # 90 days; credentials are issued under the current epoch
 grace_secs = 2592000        # 30 days after an epoch ends its credentials still spend
 presentation_limit = 100

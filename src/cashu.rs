@@ -14,7 +14,9 @@ use cdk::wallet::{ReceiveOptions, Wallet};
 use sha2::{Digest, Sha256};
 
 /// Domain separator for the idempotency key, so the same secrets used in any
-/// other protocol never collide with a cashier key.
+/// other protocol never collide with a issuer key.
+// Historical tag from the cashier era: it keys the persisted swap ledger, so
+// renaming the service must not change it.
 const TOKEN_KEY_DOMAIN: &[u8] = b"BPIR-CASHIER-TOKEN-KEY-V1";
 
 /// What a token claims about itself, read without contacting the mint.
@@ -95,7 +97,7 @@ pub fn token_key(secrets: &[String]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Why a swap did not produce money in the cashier's wallet.
+/// Why a swap did not produce money in the issuer's wallet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SwapError {
     /// The mint refused the token (already spent, bad signature, unknown
@@ -120,7 +122,7 @@ impl std::fmt::Display for SwapError {
     }
 }
 
-/// Swap (receive) a token so the cashier owns its value. Returns the amount
+/// Swap (receive) a token so the issuer owns its value. Returns the amount
 /// the mint credited, in the token's unit.
 #[async_trait::async_trait]
 pub trait Swapper: Send + Sync {

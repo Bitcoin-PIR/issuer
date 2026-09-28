@@ -177,7 +177,7 @@ async fn info_v2(State(state): State<Arc<AppState>>) -> Json<IssuerInfoV2> {
         _ => Vec::new(),
     };
     Json(IssuerInfoV2 {
-        service: "bitcoinpir-cashier".to_owned(),
+        service: "bitcoinpir-issuer".to_owned(),
         version: ISSUER_API_VERSION,
         credit_sat: gas.credit_sat,
         gas_per_credit: gas.gas_per_credit,
@@ -331,7 +331,7 @@ async fn redeem(
             CREDIT_PRESENT_KIND_ARC => {
                 let Some(arc) = state.arc.as_ref() else {
                     return Err(ApiError::unsupported_kind(
-                        "this cashier does not issue ARC credentials",
+                        "this issuer does not issue ARC credentials",
                     ));
                 };
                 let (epoch, presentations) =
@@ -406,7 +406,7 @@ async fn credentials(
     let Json(request) = body.map_err(|e| ApiError::invalid_request(format!("body: {e}")))?;
     let (Some(arc_config), Some(arc)) = (&state.config.arc, &state.arc) else {
         return Err(ApiError::unsupported_kind(
-            "this cashier does not issue ARC credentials",
+            "this issuer does not issue ARC credentials",
         ));
     };
     if request.credits != u64::from(arc.presentation_limit())

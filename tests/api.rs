@@ -9,13 +9,13 @@ use arc::{
 };
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
-use bpir_cashier::api::{build_router, AppState};
-use bpir_cashier::arc::ArcIssuer;
-use bpir_cashier::cashu::{token_key, SwapError, Swapper, TokenSummary};
-use bpir_cashier::config::Config;
-use bpir_cashier::issuer_key::IssuerKey;
-use bpir_cashier::redeem::RedeemStore;
-use bpir_cashier::store::{IssuedGrant, State as TokenState, Store};
+use bpir_issuer::api::{build_router, AppState};
+use bpir_issuer::arc::ArcIssuer;
+use bpir_issuer::cashu::{token_key, SwapError, Swapper, TokenSummary};
+use bpir_issuer::config::Config;
+use bpir_issuer::issuer_key::IssuerKey;
+use bpir_issuer::redeem::RedeemStore;
+use bpir_issuer::store::{IssuedGrant, State as TokenState, Store};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use http_body_util::BodyExt;
 use pir_credit::arc::{encode_presentations, epoch_at, presentation_context, request_context};
@@ -112,12 +112,12 @@ fn harness_in(dir: tempfile::TempDir, script: Vec<Result<u64, SwapError>>) -> Ha
 }
 
 fn fake_token(amounts: &[u64]) -> String {
-    bpir_cashier_test_token(MINT, "sat", amounts)
+    bpir_issuer_test_token(MINT, "sat", amounts)
 }
 
 /// Same construction as `cashu::test_support::fake_token` (that helper is
 /// `cfg(test)` inside the crate, so integration tests rebuild it here).
-fn bpir_cashier_test_token(mint: &str, unit: &str, amounts: &[u64]) -> String {
+fn bpir_issuer_test_token(mint: &str, unit: &str, amounts: &[u64]) -> String {
     use cdk::mint_url::MintUrl;
     use cdk::nuts::{CurrencyUnit, Id, Proof, PublicKey, Token};
     use cdk::secret::Secret;
@@ -230,7 +230,7 @@ async fn info_v2_publishes_gas_parameters_sat_offers_and_the_rate_card() {
     );
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(v["service"], "bitcoinpir-cashier");
+    assert_eq!(v["service"], "bitcoinpir-issuer");
     assert_eq!(v["version"], 2);
     assert_eq!(v["credit_sat"], 10);
     assert_eq!(v["gas_per_credit"], 72_000);
@@ -305,7 +305,7 @@ async fn redeem_refuses_foreign_servers_reused_tokens_and_unsupported_kinds() {
     let cert = server_cert(&operator_key(), "pir1");
     let token = fake_token(&[128, 64, 16, 2]);
 
-    // A certificate from an operator this cashier does not serve.
+    // A certificate from an operator this issuer does not serve.
     let foreign_cert = server_cert(&SigningKey::from_bytes(&[23u8; 32]), "pir1");
     let body = redeem_request(
         &foreign_cert,
@@ -364,8 +364,8 @@ async fn redeem_refuses_foreign_servers_reused_tokens_and_unsupported_kinds() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
     assert_eq!(answer["error"], "invalid_request");
 
-    // A token from a mint the cashier does not accept.
-    let other_mint = bpir_cashier_test_token("https://other.example", "sat", &[8]);
+    // A token from a mint the issuer does not accept.
+    let other_mint = bpir_issuer_test_token("https://other.example", "sat", &[8]);
     let body = redeem_request(
         &cert,
         "pir1",
@@ -516,7 +516,7 @@ async fn credentials_are_blind_issued_and_their_presentations_redeem_exactly_onc
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(answer["gas_added"], 72_000);
 
-    // A payload claiming an epoch the cashier does not accept.
+    // A payload claiming an epoch the issuer does not accept.
     let stale = encode_presentations(epoch + 5, &[presentations[0].clone()]).unwrap();
     let body = redeem_request(&cert, "pir1", [0x47u8; 16], &[(2, stale)]);
     let (status, answer) = post_redeem(&h.app, body).await;

@@ -365,7 +365,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bpir-cashier"
+name = "bpir-issuer"
 version = "0.1.0"
 dependencies = [
  "anyhow",

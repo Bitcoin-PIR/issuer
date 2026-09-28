@@ -1,16 +1,16 @@
 [Unit]
-Description=BitcoinPIR cashier (credit issuer for Cashu ecash)
+Description=BitcoinPIR issuer (credit issuer for Cashu ecash)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=bpir-cashier
-Group=bpir-cashier
+User=bpir-issuer
+Group=bpir-issuer
 UMask=0077
-StateDirectory=bitcoinpir-cashier
+StateDirectory=bitcoinpir-issuer
 StateDirectoryMode=0700
-ExecStart=/opt/bitcoinpir/cashier/bpir-cashier serve --config /etc/bitcoinpir/cashier/config.toml
+ExecStart=/opt/bitcoinpir/issuer/bpir-issuer serve --config /etc/bitcoinpir/issuer/config.toml
 Environment=RUST_LOG=info
 Restart=on-failure
 RestartSec=5
@@ -18,7 +18,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadOnlyPaths=/etc/bitcoinpir/cashier
+ReadOnlyPaths=/etc/bitcoinpir/issuer
 
 [Install]
 WantedBy=multi-user.target
