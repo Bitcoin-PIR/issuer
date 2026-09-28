@@ -1,0 +1,27 @@
+[Unit]
+Description=BitcoinPIR CLN RPC guard (invoice/listinvoices/waitinvoice allowlist for the issuer)
+After=bitcoinpir-mainnet-lightning.service
+Requires=bitcoinpir-mainnet-lightning.service
+
+[Service]
+Type=simple
+# Opens the node socket through the socket's group; the listening socket it
+# creates belongs to the issuer's group (Group= + UMask= give mode 0660).
+User=bitcoinpir-mainnet-cln-rpc-guard
+Group=bpir-issuer
+SupplementaryGroups=bitcoinpir-mainnet-cln-guard
+UMask=0007
+RuntimeDirectory=bpir-cln-rpc-guard
+RuntimeDirectoryMode=0750
+ExecStart=/opt/bitcoinpir/issuer/current/bpir-cln-rpc-guard --upstream /srv/lightning/bitcoin/lightning-rpc --listen /run/bpir-cln-rpc-guard/rpc.sock --max-expiry-secs 900 --invoices-per-minute 120
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/lightning/bitcoin/lightning-rpc
+
+[Install]
+WantedBy=multi-user.target

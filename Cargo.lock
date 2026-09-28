@@ -365,6 +365,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bpir-cln-rpc-guard"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bpir-issuer"
 version = "0.1.0"
 dependencies = [
