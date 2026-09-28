@@ -25,6 +25,8 @@ use bpir_issuer::config::{read_seed_file, Config};
 use bpir_issuer::issuer_key::IssuerKey;
 use bpir_issuer::redeem::RedeemStore;
 use bpir_issuer::store::Store;
+use bpir_issuer::x402::receiver::GuardReceiver;
+use bpir_issuer::x402::server::X402State;
 
 #[derive(Parser)]
 #[command(
@@ -262,6 +264,26 @@ async fn main() -> anyhow::Result<()> {
                 arc = arc.is_some(),
                 "bpir-issuer starting"
             );
+            let x402 = match &config.x402 {
+                Some(x402_config) => {
+                    let receiver = GuardReceiver::new(
+                        x402_config.guard_socket.clone(),
+                        x402_config.label_prefix.clone(),
+                    );
+                    let state = X402State::new(x402_config.clone(), Box::new(receiver))
+                        .map_err(|e| anyhow::anyhow!("[x402]: {e}"))?;
+                    tracing::info!(
+                        network = state.network.caip2(),
+                        pay_to = %x402_config.node_pubkey_hex,
+                        resource = %state.resource_url(),
+                        guard = %x402_config.guard_socket.display(),
+                        max_timeout_secs = x402_config.max_timeout_secs,
+                        "x402 exact/lnbtc enabled on POST /v2/credentials"
+                    );
+                    Some(state)
+                }
+                None => None,
+            };
             let listen = config.listen;
             let state = Arc::new(AppState {
                 config,
@@ -271,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
                 redeem_store: Mutex::new(redeem_store),
                 operator_keys,
                 arc,
+                x402,
                 clock: Box::new(bpir_issuer::unix_now),
             });
             let listener = tokio::net::TcpListener::bind(listen)

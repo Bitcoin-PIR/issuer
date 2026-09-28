@@ -16,6 +16,7 @@ pub mod config;
 pub mod issuer_key;
 pub mod redeem;
 pub mod store;
+pub mod x402;
 
 /// Unix seconds now; the only place the issuer reads the clock.
 pub fn unix_now() -> u64 {

@@ -52,6 +52,74 @@ pub struct Config {
     /// and ARC items of `POST /v2/redeem` refused.
     #[serde(default)]
     pub arc: Option<ArcConfig>,
+    /// x402 `exact/lnbtc` purchase rail. Absent keeps `POST /v2/credentials`
+    /// Cashu-only.
+    #[serde(default)]
+    pub x402: Option<X402Config>,
+}
+
+/// The `[x402]` table (`crate::x402`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct X402Config {
+    /// Socket of `bpir-cln-rpc-guard`; the issuer never opens the node's own
+    /// socket.
+    pub guard_socket: PathBuf,
+    /// The receiver node's compressed public key (66 lowercase hex). Every
+    /// invoice must be signed by it; it is published as `payTo`.
+    pub node_pubkey_hex: String,
+    /// `mainnet` or `testnet`.
+    #[serde(default = "default_x402_network")]
+    pub network: String,
+    /// Public origin of this issuer (`https://issuer.bitcoinpir.org`). The
+    /// request binding and `resource.url` use it, so x402 clients must call
+    /// exactly this host.
+    pub public_url: String,
+    /// Invoice expiry and `maxTimeoutSeconds`.
+    #[serde(default = "default_x402_timeout")]
+    pub max_timeout_secs: u64,
+    /// Prefix of every invoice label (the guard enforces the same prefix).
+    #[serde(default = "default_x402_label_prefix")]
+    pub label_prefix: String,
+    #[serde(default = "default_x402_skew")]
+    pub clock_skew_secs: u64,
+    /// Header names bound into the request hash (lowercase, ascending).
+    #[serde(default = "default_x402_bound_headers")]
+    pub bound_headers: Vec<String>,
+    /// Fresh invoices a client address may request per minute.
+    #[serde(default = "default_x402_per_ip")]
+    pub invoices_per_minute_per_ip: usize,
+    /// Fresh invoices across all clients per minute.
+    #[serde(default = "default_x402_global")]
+    pub invoices_per_minute: usize,
+}
+
+fn default_x402_network() -> String {
+    "mainnet".to_owned()
+}
+
+fn default_x402_timeout() -> u64 {
+    900
+}
+
+fn default_x402_label_prefix() -> String {
+    "bpir-x402-".to_owned()
+}
+
+fn default_x402_skew() -> u64 {
+    60
+}
+
+fn default_x402_bound_headers() -> Vec<String> {
+    vec!["content-type".to_owned()]
+}
+
+fn default_x402_per_ip() -> usize {
+    6
+}
+
+fn default_x402_global() -> usize {
+    60
 }
 
 /// The `[arc]` table.
