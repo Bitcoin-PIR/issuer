@@ -61,6 +61,19 @@ pub enum State {
         mint: String,
         unit: String,
     },
+    /// x402 `exact/lnbtc`: the Lightning payment with this hash was proven
+    /// (preimage) and an ARC credential issued under `epoch` for
+    /// `request_hex`. Keyed `x402:<network>:<payment_hash>`, which is also
+    /// the facilitator's replay entry: a second claim of the same payment is
+    /// `duplicate_settlement`.
+    X402Credentialed {
+        network: String,
+        payment_hash_hex: String,
+        msat: u64,
+        epoch: u32,
+        request_hex: String,
+        response_hex: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

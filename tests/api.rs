@@ -102,6 +102,7 @@ fn harness_in(dir: tempfile::TempDir, script: Vec<Result<u64, SwapError>>) -> Ha
         redeem_store: Mutex::new(redeem_store),
         operator_keys: vec![operator_key().verifying_key()],
         arc: Some(ArcIssuer::new([9u8; 32], ARC_EPOCH, ARC_GRACE, 4)),
+        x402: None,
         clock: Box::new(|| CLOCK.load(Ordering::SeqCst)),
     });
     Harness {

@@ -385,7 +385,9 @@ dependencies = [
  "arc",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bip39",
+ "bitcoin",
  "cdk",
  "cdk-sqlite",
  "clap",
@@ -394,10 +396,12 @@ dependencies = [
  "hex",
  "hkdf",
  "http-body-util",
+ "lightning-invoice",
  "pir-credit",
  "pir-identity",
  "rand_core 0.6.4",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2",
  "tempfile",
@@ -2371,6 +2375,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "ryu-js"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6518fc26bced4d53678a22d6e423e9d8716377def84545fe328236e3af070e7f"
+
+[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2517,6 +2527,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.5",
+]
+
+[[package]]
+name = "serde_jcs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3a60f3fda61525e439ef6d67422118f11e986566997d9021c56867ad814a0aa"
+dependencies = [
+ "ryu-js",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

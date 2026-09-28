@@ -4,12 +4,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -28,6 +29,14 @@ use crate::config::Config;
 use crate::issuer_key::IssuerKey;
 use crate::redeem::{verify_request, RedeemEvent, RedeemStore};
 use crate::store::{State as TokenState, Store};
+use crate::x402::facilitator::Settled;
+use crate::x402::server::{ChallengeError, X402State};
+use crate::x402::{self, header_value, parse_header, PaymentPayload, SettlementResponse};
+
+/// x402 HTTP transport headers (`specs/transports-v2/http.md`).
+const PAYMENT_REQUIRED: HeaderName = HeaderName::from_static("payment-required");
+const PAYMENT_SIGNATURE: HeaderName = HeaderName::from_static("payment-signature");
+const PAYMENT_RESPONSE: HeaderName = HeaderName::from_static("payment-response");
 
 /// Tokens are a few kilobytes; anything larger is not a purchase.
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -47,6 +56,9 @@ pub struct AppState {
     /// Operator keys whose certified servers may redeem (from
     /// `operator_pubkeys`).
     pub operator_keys: Vec<VerifyingKey>,
+    /// x402 `exact/lnbtc` purchase rail; `None` keeps `POST /v2/credentials`
+    /// Cashu-only.
+    pub x402: Option<X402State>,
     /// ARC issuer (`[arc]`), `None` when credentials are not sold.
     pub arc: Option<ArcIssuer>,
     pub clock: Box<dyn Fn() -> u64 + Send + Sync>,
@@ -91,6 +103,19 @@ impl ApiError {
     }
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
+    }
+    pub fn rate_limited(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", message)
+    }
+    pub fn receiver_unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "receiver_unavailable",
+            message,
+        )
+    }
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "not_found", message)
     }
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
@@ -146,12 +171,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(allow_origin)
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([header::CONTENT_TYPE])
+        .allow_headers([header::CONTENT_TYPE, PAYMENT_SIGNATURE])
+        .expose_headers([PAYMENT_REQUIRED, PAYMENT_RESPONSE])
         .max_age(std::time::Duration::from_secs(3600));
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v2/info", get(info_v2))
         .route("/v2/credentials", post(credentials))
+        .route("/v2/x402/invoices/{payment_hash}", get(x402_invoice_status))
         .route("/v2/redeem", post(redeem))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(cors)
@@ -263,6 +290,11 @@ async fn redeem(
                     Some(TokenState::Credentialed { .. }) => {
                         return Err(ApiError::already_redeemed(
                             "this token already bought an ARC credential",
+                        ));
+                    }
+                    Some(TokenState::X402Credentialed { .. }) => {
+                        return Err(ApiError::already_redeemed(
+                            "this key belongs to an x402 payment",
                         ));
                     }
                     Some(TokenState::Pending { .. }) => {
@@ -401,9 +433,28 @@ async fn redeem(
 /// client must persist its request and secrets before sending.
 async fn credentials(
     State(state): State<Arc<AppState>>,
-    body: Result<Json<CredentialRequestV2>, axum::extract::rejection::JsonRejection>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let value: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::invalid_request(format!("body: {e}")))?;
+    if value.get("token").is_some() {
+        let request: CredentialRequestV2 = serde_json::from_value(value)
+            .map_err(|e| ApiError::invalid_request(format!("body: {e}")))?;
+        return credentials_cashu(state, request)
+            .await
+            .map(IntoResponse::into_response);
+    }
+    let request: X402CredentialRequest = serde_json::from_value(value)
+        .map_err(|e| ApiError::invalid_request(format!("body: {e}")))?;
+    credentials_x402(state, headers, body, request).await
+}
+
+/// The Cashu purchase: the body carried a `token`.
+async fn credentials_cashu(
+    state: Arc<AppState>,
+    request: CredentialRequestV2,
 ) -> Result<Json<CredentialResponseV2>, ApiError> {
-    let Json(request) = body.map_err(|e| ApiError::invalid_request(format!("body: {e}")))?;
     let (Some(arc_config), Some(arc)) = (&state.config.arc, &state.arc) else {
         return Err(ApiError::unsupported_kind(
             "this issuer does not issue ARC credentials",
@@ -477,6 +528,11 @@ async fn credentials(
                 "this token was already redeemed through {server_id}"
             )));
         }
+        Some(TokenState::X402Credentialed { .. }) => {
+            return Err(ApiError::already_redeemed(
+                "this key belongs to an x402 payment",
+            ));
+        }
         Some(TokenState::Pending { .. }) => {
             tracing::error!(token_key = %key_hex,
                 "token with an unknown earlier swap outcome presented again; reconcile manually");
@@ -546,4 +602,246 @@ async fn credentials(
         issuer_public_key_hex: arc.public_key_hex(epoch),
         valid_until: arc.valid_until(epoch),
     }))
+}
+
+/// `POST /v2/credentials` body without a Cashu token: an x402 purchase of
+/// one pack. The blinded ARC request travels in the same body on the
+/// challenge and on the paid retry; the body bytes are part of the request
+/// binding, so the retry must repeat them exactly.
+#[derive(Deserialize)]
+struct X402CredentialRequest {
+    credits: u64,
+    sat: u64,
+    request_hex: String,
+}
+
+/// x402 `exact/lnbtc` (`crate::x402`): without `PAYMENT-SIGNATURE`, answer
+/// `402` with a fresh request-bound invoice; with it, settle the proof and
+/// issue the credential. One payment buys one credential: a repeat of the
+/// identical request replays the stored answer, another request with the
+/// same payment is `duplicate_settlement`.
+async fn credentials_x402(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+    request: X402CredentialRequest,
+) -> Result<Response, ApiError> {
+    let Some(x) = state.x402.as_ref() else {
+        return Err(ApiError::unsupported_kind(
+            "the body has no Cashu token and x402 is not enabled on this issuer",
+        ));
+    };
+    let (Some(arc_config), Some(arc)) = (&state.config.arc, &state.arc) else {
+        return Err(ApiError::unsupported_kind(
+            "this issuer does not issue ARC credentials",
+        ));
+    };
+    if request.credits != u64::from(arc.presentation_limit())
+        || !arc_config
+            .credential_offers
+            .iter()
+            .any(|offer| offer.credits == request.credits && offer.sat == request.sat)
+    {
+        return Err(ApiError::invalid_request("unknown credential offer"));
+    }
+    let request_bytes = hex::decode(&request.request_hex)
+        .map_err(|_| ApiError::invalid_request("request_hex is not hex"))?;
+    if request_bytes.len() != arc::CredentialRequest::SIZE {
+        return Err(ApiError::invalid_request(format!(
+            "request_hex must encode {} bytes",
+            arc::CredentialRequest::SIZE
+        )));
+    }
+    let request_hex = hex::encode(&request_bytes);
+    let bound = x.bind(&headers, &body).map_err(ApiError::invalid_request)?;
+    let now = (state.clock)();
+
+    let Some(signature) = headers.get(&PAYMENT_SIGNATURE) else {
+        let ip = client_ip(&headers);
+        let required = match x
+            .challenge(&bound, request.credits, request.sat, now, &ip)
+            .await
+        {
+            Ok(required) => required,
+            Err(ChallengeError::RateLimited) => {
+                return Err(ApiError::rate_limited(
+                    "too many fresh invoices from this address; retry in a minute",
+                ));
+            }
+            Err(ChallengeError::Receiver(e)) => {
+                tracing::warn!(error = %e, "x402: receiver unavailable");
+                return Err(ApiError::receiver_unavailable(
+                    "the Lightning receiver is unavailable; retry later",
+                ));
+            }
+            Err(ChallengeError::Invalid(reason)) => {
+                tracing::error!(
+                    reason,
+                    "x402: the receiver's invoice fails our own checks; check x402.node_pubkey_hex"
+                );
+                return Err(ApiError::internal("receiver invoice rejected"));
+            }
+        };
+        return Ok((
+            StatusCode::PAYMENT_REQUIRED,
+            [(PAYMENT_REQUIRED, header_value(&required))],
+            Json(required),
+        )
+            .into_response());
+    };
+    let signature = signature
+        .to_str()
+        .map_err(|_| ApiError::invalid_request("PAYMENT-SIGNATURE is not ASCII"))?;
+    let payload: PaymentPayload = parse_header(signature)
+        .map_err(|e| ApiError::invalid_request(format!("PAYMENT-SIGNATURE: {e}")))?;
+    let network = x.network.caip2();
+    let settled = match x.settle(&bound, request.sat, &payload, now) {
+        Ok(settled) => settled,
+        Err(reason) => {
+            tracing::info!(reason, "x402: settlement refused");
+            return Ok(payment_failed(network, reason));
+        }
+    };
+    let epoch = arc.current_epoch(now);
+    let key = format!("x402:{}", settled.replay_key);
+    let mut store = state.store.lock().await;
+    match store.get(&key).cloned() {
+        Some(TokenState::X402Credentialed {
+            request_hex: stored_request,
+            response_hex,
+            epoch,
+            ..
+        }) => {
+            if stored_request != request_hex {
+                return Ok(payment_failed(network, "duplicate_settlement"));
+            }
+            tracing::info!(
+                epoch,
+                "x402: replaying a credential for a payment seen before"
+            );
+            return Ok(credential_response(arc, epoch, response_hex, &settled));
+        }
+        Some(_) => return Ok(payment_failed(network, "duplicate_settlement")),
+        None => {}
+    }
+    let response_bytes = arc.issue(epoch, &request_bytes)?;
+    let response_hex = hex::encode(&response_bytes);
+    store
+        .record(
+            &key,
+            TokenState::X402Credentialed {
+                network: network.to_owned(),
+                payment_hash_hex: settled.payment_hash_hex.clone(),
+                msat: settled.amount_msat,
+                epoch,
+                request_hex,
+                response_hex: response_hex.clone(),
+            },
+        )
+        .map_err(|e| ApiError::internal(format!("store: {e}")))?;
+    tracing::info!(
+        epoch,
+        msat = settled.amount_msat,
+        payment_hash = %settled.payment_hash_hex,
+        "x402: ARC credential issued"
+    );
+    Ok(credential_response(arc, epoch, response_hex, &settled))
+}
+
+fn credential_response(
+    arc: &ArcIssuer,
+    epoch: u32,
+    response_hex: String,
+    settled: &Settled,
+) -> Response {
+    let settlement = SettlementResponse {
+        success: true,
+        error_reason: None,
+        transaction: settled.payment_hash_hex.clone(),
+        network: settled.network.caip2().to_owned(),
+    };
+    (
+        StatusCode::OK,
+        [(PAYMENT_RESPONSE, header_value(&settlement))],
+        Json(CredentialResponseV2 {
+            response_hex,
+            epoch,
+            presentation_limit: arc.presentation_limit(),
+            issuer_public_key_hex: arc.public_key_hex(epoch),
+            valid_until: arc.valid_until(epoch),
+        }),
+    )
+        .into_response()
+}
+
+/// A refused settlement: `402` with the facilitator's reason in
+/// `PAYMENT-RESPONSE` (no new invoice; the client asks again without a
+/// signature for a fresh challenge).
+fn payment_failed(network: &str, reason: &str) -> Response {
+    let settlement = SettlementResponse::failure(network, reason);
+    (
+        StatusCode::PAYMENT_REQUIRED,
+        [(PAYMENT_RESPONSE, header_value(&settlement))],
+        Json(serde_json::json!({ "error": "payment_failed", "message": reason })),
+    )
+        .into_response()
+}
+
+/// The client address for the invoice limiter: the tunnel's
+/// `CF-Connecting-IP`, else the first `X-Forwarded-For` hop, else one shared
+/// bucket.
+fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("local")
+        .to_owned()
+}
+
+/// `GET /v2/x402/invoices/{payment_hash}`: the state of one challenge
+/// invoice, so a browser whose user paid the QR code from a phone can finish
+/// the same x402 retry; the preimage is returned once the node reports the
+/// invoice paid. Only invoices carrying the x402 label prefix are visible.
+async fn x402_invoice_status(
+    State(state): State<Arc<AppState>>,
+    Path(payment_hash): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(x) = state.x402.as_ref() else {
+        return Err(ApiError::unsupported_kind(
+            "x402 is not enabled on this issuer",
+        ));
+    };
+    if !x402::is_lower_hex(&payment_hash, 64) {
+        return Err(ApiError::invalid_request(
+            "payment_hash must be 64 lowercase hex characters",
+        ));
+    }
+    let found = x.receiver.lookup(&payment_hash).await.map_err(|e| {
+        tracing::warn!(error = %e, "x402: invoice lookup failed");
+        ApiError::receiver_unavailable("the Lightning receiver is unavailable; retry later")
+    })?;
+    let Some(invoice) = found.filter(|i| i.label.starts_with(&x.config.label_prefix)) else {
+        return Err(ApiError::not_found(
+            "no x402 invoice with this payment hash",
+        ));
+    };
+    let preimage = if invoice.status == "paid" {
+        invoice.preimage_hex
+    } else {
+        None
+    };
+    Ok(Json(serde_json::json!({
+        "payment_hash": payment_hash,
+        "status": invoice.status,
+        "bolt11": invoice.bolt11,
+        "preimage": preimage,
+    })))
 }

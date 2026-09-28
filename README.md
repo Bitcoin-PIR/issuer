@@ -113,6 +113,37 @@ below the token's face value. The issuer validates the **face value**
 against the pack and absorbs the fee; the credited amount is recorded in
 `grants.jsonl`.
 
+## x402 `exact/lnbtc` (Lightning) purchase rail
+
+With a `[x402]` table (`config.example.toml`), `POST /v2/credentials` also
+accepts the x402 flow (x402-foundation/x402
+`specs/schemes/exact/scheme_exact_lnbtc.md`, merged 2026-09-23; HTTP
+transport `specs/transports-v2/http.md`):
+
+1. A body without a `token` (`{ "credits", "sat", "request_hex" }`) and
+   without `PAYMENT-SIGNATURE` is answered `402` with `PAYMENT-REQUIRED`
+   (base64 `PaymentRequired`, also the JSON body): scheme `exact`, network
+   `lnbtc:000000000019d6689c085ae165831e93`, `amount` in millisatoshi,
+   `payTo` = the node key, `extra.invoice` = a fresh BOLT11 whose description
+   hash is the `http:1` request hash (JCS of method, URL, body hash, and the
+   bound headers), `extra.requestHash`, profile, and params.
+2. The client pays and retries the byte-identical request with
+   `PAYMENT-SIGNATURE` (base64 `PaymentPayload` carrying `payload.preimage`).
+   The issuer recomputes the binding from the actual request, runs the
+   facilitator checks (accepted terms, strict BOLT11 decode, payee =
+   `payTo`, description hash = request hash, preimage = payment hash,
+   paid-but-expired window), records `x402:<network>:<payment_hash>` in the
+   store (its replay entry: a second claim is `duplicate_settlement`, an
+   identical retry replays the answer), and issues the ARC credential with
+   `PAYMENT-RESPONSE` (`transaction` = payment hash, no `payer`).
+3. A human can pay the same invoice from a phone: `GET
+   /v2/x402/invoices/{payment_hash}` reports `unpaid` / `paid` / `expired`
+   and, once paid, the preimage, so the browser finishes step 2 unchanged.
+   Only invoices with the x402 label prefix are visible.
+
+Fresh invoices are limited per client address and globally. Money lands in
+the node's channel balance (not in the Cashu wallet); `bpir-issuer
+settlement` is unaffected. The web client still uses the Cashu flow.
 ## `bpir-cln-rpc-guard` (workspace member `cln-rpc-guard/`)
 
 The issuer never opens the Core Lightning socket. For x402 (`exact/lnbtc`)

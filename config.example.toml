@@ -59,3 +59,20 @@ credits = 2
 [[rate_card]]
 flow = "oram_single_address"
 credits = 1
+
+# x402 `exact/lnbtc` (Lightning) purchase rail for `POST /v2/credentials`.
+# Remove the table to keep the endpoint Cashu-only. The issuer talks to the
+# node only through `bpir-cln-rpc-guard` (invoice / listinvoices /
+# waitinvoice, bounded parameters); it never opens the node socket.
+# [x402]
+# guard_socket = "/run/bpir-cln-rpc-guard/rpc.sock"
+# # The receiver node's compressed public key; every invoice must be signed by it.
+# node_pubkey_hex = "02…"
+# network = "mainnet"                 # or "testnet"
+# public_url = "https://issuer.bitcoinpir.org"   # request binding + resource.url; clients must call this exact host
+# max_timeout_secs = 900              # invoice expiry = maxTimeoutSeconds
+# label_prefix = "bpir-x402-"         # must equal the guard's --label-prefix
+# clock_skew_secs = 60
+# bound_headers = ["content-type"]    # http:1 binding, lowercase ascending
+# invoices_per_minute_per_ip = 6
+# invoices_per_minute = 60

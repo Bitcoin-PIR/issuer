@@ -49,6 +49,12 @@ getrandom = "0.2"
 zeroize = "1"
 # BIP39 phrase generation for the mint seed file (`bpir-issuer mnemonic`).
 bip39 = { version = "2", default-features = false, features = ["rand", "std"] }
+# x402 exact/lnbtc (specs/schemes/exact/scheme_exact_lnbtc.md): BOLT11
+# decoding and payee recovery, RFC 8785 canonical JSON for request binding,
+# base64 for the PAYMENT-* headers.
+lightning-invoice = "0.34"
+serde_jcs = "0.2"
+base64 = "0.22"
 # Operations.
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
@@ -59,6 +65,8 @@ async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# Signs test invoices for the x402 tests.
+bitcoin = { version = "0.32", default-features = false, features = ["std", "secp-recovery", "rand-std"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
