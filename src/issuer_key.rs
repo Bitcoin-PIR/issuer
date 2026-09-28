@@ -1,6 +1,6 @@
 //! The issuer's Ed25519 key. It signs every `POST /v2/redeem` answer
 //! (docs/CREDITS.md "Issuer API"), and the PIR servers pin its public key
-//! with `--credit-issuer-pubkey`. The seed is the file `bpir-cashier keygen`
+//! with `--credit-issuer-pubkey`. The seed is the file `bpir-issuer keygen`
 //! writes (`grant.key` in production: the name predates credits, and the
 //! public key is the one the servers already pin).
 

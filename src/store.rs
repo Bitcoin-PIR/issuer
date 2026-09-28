@@ -3,7 +3,7 @@
 //!
 //! Each line is one [`Event`]; the last event for a key is its state. The file
 //! is the operator's reconciliation log (every token seen, what it bought,
-//! every swap failure) and survives restarts: the cashier replays it at
+//! every swap failure) and survives restarts: the issuer replays it at
 //! startup. Writes are appended with `fsync` before the request proceeds.
 
 use std::collections::HashMap;

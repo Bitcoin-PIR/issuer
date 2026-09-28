@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Socket the HTTP server binds. Put a reverse proxy or a Cloudflare
-    /// tunnel in front; the cashier speaks plain HTTP.
+    /// tunnel in front; the issuer speaks plain HTTP.
     pub listen: SocketAddr,
     /// 32-byte Ed25519 issuer seed (raw, or 64 hex characters) that signs
     /// every `POST /v2/redeem` answer. The PIR servers pin the matching
@@ -59,7 +59,7 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct ArcConfig {
     /// 32-byte master seed (raw, or 64 hex characters) from
-    /// `bpir-cashier arc-seed`; every epoch's issuer keys derive from it.
+    /// `bpir-issuer arc-seed`; every epoch's issuer keys derive from it.
     pub seed_path: PathBuf,
     #[serde(default = "default_arc_epoch_secs")]
     pub epoch_secs: u64,

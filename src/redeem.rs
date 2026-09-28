@@ -1,5 +1,5 @@
 //! `POST /v2/redeem` (docs/CREDITS.md "Issuer API"): a PIR server forwards
-//! what a client presented; the cashier authenticates the server, verifies
+//! what a client presented; the issuer authenticates the server, verifies
 //! and settles each item, books the value to the server's account, and
 //! answers with a signed gas amount.
 //!
@@ -42,7 +42,7 @@ pub fn verify_request(
 ) -> Result<VerifiedRedeem, ApiError> {
     if operator_keys.is_empty() {
         return Err(ApiError::unauthorized(
-            "this cashier accepts no server: operator_pubkeys is empty",
+            "this issuer accepts no server: operator_pubkeys is empty",
         ));
     }
     let cert_bytes = hex::decode(&request.identity_cert_hex)
@@ -56,7 +56,7 @@ pub fn verify_request(
         .any(|key| key.to_bytes() == cert.operator_pubkey)
     {
         return Err(ApiError::unauthorized(
-            "identity certificate is signed by an operator this cashier does not serve",
+            "identity certificate is signed by an operator this issuer does not serve",
         ));
     }
     if cert.server_id != request.server_id {
@@ -74,7 +74,7 @@ pub fn verify_request(
     let skew = now.abs_diff(request.unix_time);
     if skew > max_skew_secs {
         return Err(ApiError::invalid_request(format!(
-            "request time is {skew}s away from the cashier clock (limit {max_skew_secs}s)"
+            "request time is {skew}s away from the issuer clock (limit {max_skew_secs}s)"
         )));
     }
     let nonce_bytes = hex::decode(&request.nonce_hex)

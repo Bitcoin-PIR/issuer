@@ -1,14 +1,14 @@
-//! `bpir-cashier` — operator CLI.
+//! `bpir-issuer` — operator CLI.
 //!
 //! ```text
-//! bpir-cashier serve --config /etc/bitcoinpir/cashier/config.toml
-//! bpir-cashier keygen --out grant.key            # issuer signing seed (prints the pubkey to pin)
-//! bpir-cashier wallet-seed --out wallet.seed     # Cashu wallet seed
-//! bpir-cashier pubkey --key grant.key            # print the public key for --credit-issuer-pubkey
-//! bpir-cashier balance --config config.toml      # ecash held per (mint, unit)
-//! bpir-cashier mnemonic --out mint.seed          # BIP39 phrase for cdk-mintd --seed-file
-//! bpir-cashier settlement --config config.toml   # gas and sat redeemed per PIR server
-//! bpir-cashier arc-seed --out arc.seed           # ARC master seed (per-epoch issuer keys)
+//! bpir-issuer serve --config /etc/bitcoinpir/issuer/config.toml
+//! bpir-issuer keygen --out grant.key            # issuer signing seed (prints the pubkey to pin)
+//! bpir-issuer wallet-seed --out wallet.seed     # Cashu wallet seed
+//! bpir-issuer pubkey --key grant.key            # print the public key for --credit-issuer-pubkey
+//! bpir-issuer balance --config config.toml      # ecash held per (mint, unit)
+//! bpir-issuer mnemonic --out mint.seed          # BIP39 phrase for cdk-mintd --seed-file
+//! bpir-issuer settlement --config config.toml   # gas and sat redeemed per PIR server
+//! bpir-issuer arc-seed --out arc.seed           # ARC master seed (per-epoch issuer keys)
 //! ```
 
 use std::path::PathBuf;
@@ -18,18 +18,18 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use tokio::sync::Mutex;
 
-use bpir_cashier::api::{build_router, AppState};
-use bpir_cashier::arc::ArcIssuer;
-use bpir_cashier::cashu::CdkSwapper;
-use bpir_cashier::config::{read_seed_file, Config};
-use bpir_cashier::issuer_key::IssuerKey;
-use bpir_cashier::redeem::RedeemStore;
-use bpir_cashier::store::Store;
+use bpir_issuer::api::{build_router, AppState};
+use bpir_issuer::arc::ArcIssuer;
+use bpir_issuer::cashu::CdkSwapper;
+use bpir_issuer::config::{read_seed_file, Config};
+use bpir_issuer::issuer_key::IssuerKey;
+use bpir_issuer::redeem::RedeemStore;
+use bpir_issuer::store::Store;
 
 #[derive(Parser)]
 #[command(
-    name = "bpir-cashier",
-    about = "BitcoinPIR cashier: credits for Cashu ecash",
+    name = "bpir-issuer",
+    about = "BitcoinPIR issuer: credits for Cashu ecash",
     version
 )]
 struct Cli {
@@ -60,7 +60,7 @@ enum Command {
         #[arg(long)]
         key: PathBuf,
     },
-    /// Print the ecash balance the cashier holds per (mint, unit).
+    /// Print the ecash balance the issuer holds per (mint, unit).
     Balance {
         #[arg(long)]
         config: PathBuf,
@@ -253,14 +253,14 @@ async fn main() -> anyhow::Result<()> {
             }
             tracing::info!(
                 listen = %config.listen,
-                cashier_pubkey_hex = %issuer.public_key_hex(),
+                issuer_pubkey_hex = %issuer.public_key_hex(),
                 mints = ?config.mints,
                 redeemed_tokens = store.redeemed_count(),
                 store = %store.path().display(),
                 redeem_store = %redeem_store.path().display(),
                 operator_keys = operator_keys.len(),
                 arc = arc.is_some(),
-                "bpir-cashier starting"
+                "bpir-issuer starting"
             );
             let listen = config.listen;
             let state = Arc::new(AppState {
@@ -271,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
                 redeem_store: Mutex::new(redeem_store),
                 operator_keys,
                 arc,
-                clock: Box::new(bpir_cashier::unix_now),
+                clock: Box::new(bpir_issuer::unix_now),
             });
             let listener = tokio::net::TcpListener::bind(listen)
                 .await

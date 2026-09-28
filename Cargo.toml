@@ -1,15 +1,15 @@
 [package]
-name = "bpir-cashier"
+name = "bpir-issuer"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bitcoin PIR contributors"]
-description = "BitcoinPIR cashier: sells Ed25519 session grants for Cashu ecash (docs/CASHIER_API.md in Bitcoin-PIR/Bitcoin-PIR)"
+description = "BitcoinPIR issuer: sells ARC and Cashu credits for PIR servers (docs/ISSUER_API.md in Bitcoin-PIR/Bitcoin-PIR)"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Bitcoin-PIR/cashier"
+repository = "https://github.com/Bitcoin-PIR/issuer"
 publish = false
 
 [[bin]]
-name = "bpir-cashier"
+name = "bpir-issuer"
 path = "src/main.rs"
 
 [dependencies]
@@ -43,7 +43,7 @@ sha2 = "0.10"
 hex = "0.4"
 getrandom = "0.2"
 zeroize = "1"
-# BIP39 phrase generation for the mint seed file (`bpir-cashier mnemonic`).
+# BIP39 phrase generation for the mint seed file (`bpir-issuer mnemonic`).
 bip39 = { version = "2", default-features = false, features = ["rand", "std"] }
 # Operations.
 clap = { version = "4", features = ["derive"] }
