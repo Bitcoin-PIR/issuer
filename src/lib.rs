@@ -1,5 +1,6 @@
 //! BitcoinPIR issuer: the credit issuer. It sells ARC credentials for
-//! Cashu ecash (`POST /v2/credentials`), verifies every presentation a PIR
+//! Cashu ecash (`POST /v2/credentials`), sells Cashu ecash for Lightning
+//! (`POST /v2/x402/ecash`, [`ecash`]), verifies every presentation a PIR
 //! server forwards (`POST /v2/redeem`, answers signed with the
 //! [`issuer_key`]), and settles with each server in gas.
 //!
@@ -13,6 +14,7 @@ pub mod api;
 pub mod arc;
 pub mod cashu;
 pub mod config;
+pub mod ecash;
 pub mod issuer_key;
 pub mod redeem;
 pub mod store;

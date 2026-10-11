@@ -1,5 +1,5 @@
 //! x402 `exact` on Bitcoin Lightning (`lnbtc`), as a way to buy a credential
-//! pack: `specs/schemes/exact/scheme_exact_lnbtc.md` and
+//! pack or Cashu ecash: `specs/schemes/exact/scheme_exact_lnbtc.md` and
 //! `specs/transports-v2/http.md` in x402-foundation/x402 (spec merged
 //! 2026-09-23).
 //!
@@ -12,9 +12,11 @@
 //!   over its inputs so it could move to its own process unchanged.
 //!
 //! The issuer is the x402 *resource server*: `POST /v2/credentials` without a
-//! Cashu token is answered `402` with a fresh request-bound invoice; a retry
-//! carrying the preimage in `PAYMENT-SIGNATURE` settles and issues the
-//! credential. The same invoice is shown as a QR code for a human payer, and
+//! Cashu token, and `POST /v2/x402/ecash`, are answered `402` with a fresh
+//! request-bound invoice; a retry carrying the preimage in
+//! `PAYMENT-SIGNATURE` settles and issues the credential, or the blind
+//! signatures on the client's ecash outputs (`crate::ecash`). The same
+//! invoice is shown as a QR code for a human payer, and
 //! `GET /v2/x402/invoices/{payment_hash}` reports its state (and the preimage
 //! once paid) so the browser can complete the identical retry.
 

@@ -22,11 +22,12 @@ use bpir_issuer::api::{build_router, AppState};
 use bpir_issuer::arc::ArcIssuer;
 use bpir_issuer::cashu::CdkSwapper;
 use bpir_issuer::config::{read_seed_file, Config};
+use bpir_issuer::ecash::CdkSeller;
 use bpir_issuer::issuer_key::IssuerKey;
 use bpir_issuer::redeem::RedeemStore;
 use bpir_issuer::store::Store;
 use bpir_issuer::x402::receiver::GuardReceiver;
-use bpir_issuer::x402::server::X402State;
+use bpir_issuer::x402::server::{X402State, CREDENTIALS_PATH, ECASH_PATH};
 
 #[derive(Parser)]
 #[command(
@@ -231,6 +232,14 @@ async fn main() -> anyhow::Result<()> {
                 std::time::Duration::from_secs(45),
             )
             .await?;
+            swapper.recover().await;
+            // Ecash is sold from the first mint, the one the browser buys from.
+            let seller = CdkSeller::new(
+                swapper
+                    .wallet(&config.mints[0], "sat")
+                    .context("no sat wallet for the first mint")?,
+                std::time::Duration::from_secs(45),
+            );
             let store = Store::open(&config.store_path)?;
             let redeem_store = RedeemStore::open(&config.redeem_store_path())?;
             let operator_keys = config.operator_keys();
@@ -275,10 +284,14 @@ async fn main() -> anyhow::Result<()> {
                     tracing::info!(
                         network = state.network.caip2(),
                         pay_to = %x402_config.node_pubkey_hex,
-                        resource = %state.resource_url(),
+                        resource = %state.resource_url(CREDENTIALS_PATH),
+                        ecash = %state.resource_url(ECASH_PATH),
+                        ecash_mint = %config.mints[0],
+                        ecash_min_sat = x402_config.ecash_min_sat,
+                        ecash_max_sat = x402_config.ecash_max_sat,
                         guard = %x402_config.guard_socket.display(),
                         max_timeout_secs = x402_config.max_timeout_secs,
-                        "x402 exact/lnbtc enabled on POST /v2/credentials"
+                        "x402 exact/lnbtc enabled on POST /v2/credentials and POST /v2/x402/ecash"
                     );
                     Some(state)
                 }
@@ -289,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
                 config,
                 issuer,
                 swapper: Box::new(swapper),
+                seller: Box::new(seller),
                 store: Mutex::new(store),
                 redeem_store: Mutex::new(redeem_store),
                 operator_keys,

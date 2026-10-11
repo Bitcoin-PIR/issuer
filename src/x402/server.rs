@@ -1,7 +1,7 @@
-//! The resource-server side of `POST /v2/credentials` over x402: binds the
-//! incoming request, asks the receiver for a request-bound invoice, checks it
-//! before publishing the challenge, and settles a paid retry through the
-//! facilitator logic.
+//! The resource-server side of the x402 resources (`POST /v2/credentials`,
+//! `POST /v2/x402/ecash`): binds the incoming request, asks the receiver for a
+//! request-bound invoice, checks it before publishing the challenge, and
+//! settles a paid retry through the facilitator logic.
 
 use super::binding::{self, Binding, BoundHeader};
 use super::facilitator::{self, Settled};
@@ -19,6 +19,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 pub const CREDENTIALS_PATH: &str = "/v2/credentials";
+pub const ECASH_PATH: &str = "/v2/x402/ecash";
 
 pub struct X402State {
     pub config: X402Config,
@@ -70,6 +71,9 @@ impl X402State {
         if config.max_timeout_secs == 0 {
             return Err("x402.max_timeout_secs must be positive".into());
         }
+        if config.ecash_min_sat > config.ecash_max_sat {
+            return Err("x402.ecash_min_sat must not exceed x402.ecash_max_sat".into());
+        }
         let limiter = Mutex::new(IpLimiter::new(
             config.invoices_per_minute_per_ip,
             config.invoices_per_minute,
@@ -82,14 +86,20 @@ impl X402State {
         })
     }
 
-    pub fn resource_url(&self) -> String {
-        format!("{}{CREDENTIALS_PATH}", self.config.public_url)
+    pub fn resource_url(&self, path: &str) -> String {
+        format!("{}{path}", self.config.public_url)
     }
 
-    /// Binds a `POST /v2/credentials` request: the configured public URL,
-    /// the raw body bytes, and the configured headers as sent. A bound header
-    /// whose value is not visible ASCII is rejected, as the profile requires.
-    pub fn bind(&self, headers: &HeaderMap, body: &[u8]) -> Result<BoundRequest, &'static str> {
+    /// Binds a `POST` request to the resource at `path`: the configured public
+    /// URL, the raw body bytes, and the configured headers as sent. A bound
+    /// header whose value is not visible ASCII is rejected, as the profile
+    /// requires.
+    pub fn bind(
+        &self,
+        path: &str,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BoundRequest, &'static str> {
         let mut bound = Vec::with_capacity(self.config.bound_headers.len());
         for name in &self.config.bound_headers {
             let value = match headers.get(name.as_str()) {
@@ -98,7 +108,7 @@ impl X402State {
             };
             bound.push(BoundHeader { name, value });
         }
-        let resource_url = self.resource_url();
+        let resource_url = self.resource_url(path);
         let binding = binding::http1("POST", &resource_url, body, &bound);
         Ok(BoundRequest {
             binding,
@@ -131,11 +141,12 @@ impl X402State {
         }
     }
 
-    /// A fresh challenge: one invoice for `sat`, bound to the request.
+    /// A fresh challenge: one invoice for `sat`, bound to the request;
+    /// `description` names what it buys in `resource.description`.
     pub async fn challenge(
         &self,
         bound: &BoundRequest,
-        credits: u64,
+        description: String,
         sat: u64,
         now_unix: u64,
         client_ip: &str,
@@ -182,7 +193,7 @@ impl X402State {
             ),
             resource: ResourceInfo {
                 url: bound.resource_url.clone(),
-                description: Some(format!("BitcoinPIR credential pack: {credits} credits")),
+                description: Some(description),
                 mime_type: Some("application/json".into()),
                 service_name: Some("BitcoinPIR issuer".into()),
             },

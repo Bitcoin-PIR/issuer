@@ -34,6 +34,8 @@ ed25519-dalek = "2"
 # Cashu wallet (token parsing + swap/receive at the mint) and its SQLite store.
 cdk = { version = "0.18", default-features = false, features = ["wallet"] }
 cdk-sqlite = { version = "0.18", default-features = false, features = ["wallet"] }
+# Wallet operation ids (cdk reserves proofs per operation) for ecash sales.
+uuid = "1"
 # HTTP.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs"] }
@@ -69,6 +71,12 @@ tempfile = "3"
 bitcoin = { version = "0.32", default-features = false, features = ["std", "secp-recovery", "rand-std"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+# tests/mint.rs: an in-process cdk mint with a fake Lightning backend. The
+# mint feature builds cdk-signatory's gRPC code, so tests need `protoc`;
+# cdk crates pin each other exactly, hence `=0.18.0`.
+cdk = { version = "0.18", default-features = false, features = ["wallet", "mint"] }
+cdk-sqlite = { version = "0.18", default-features = false, features = ["wallet", "mint"] }
+cdk-fake-wallet = { version = "=0.18.0", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -92,6 +92,12 @@ pub struct X402Config {
     /// Fresh invoices across all clients per minute.
     #[serde(default = "default_x402_global")]
     pub invoices_per_minute: usize,
+    /// Smallest `sat` one `POST /v2/x402/ecash` purchase may buy.
+    #[serde(default = "default_x402_ecash_min_sat")]
+    pub ecash_min_sat: u64,
+    /// Largest `sat` one `POST /v2/x402/ecash` purchase may buy.
+    #[serde(default = "default_x402_ecash_max_sat")]
+    pub ecash_max_sat: u64,
 }
 
 fn default_x402_network() -> String {
@@ -120,6 +126,14 @@ fn default_x402_per_ip() -> usize {
 
 fn default_x402_global() -> usize {
     60
+}
+
+fn default_x402_ecash_min_sat() -> u64 {
+    10
+}
+
+fn default_x402_ecash_max_sat() -> u64 {
+    20_000
 }
 
 /// The `[arc]` table.

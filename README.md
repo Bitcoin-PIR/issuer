@@ -54,7 +54,9 @@ cargo test
 ```
 
 `cdk` is built with `default-features = false, features = ["wallet"]`; no
-mint, nostr, or Lightning code is compiled in.
+mint, nostr, or Lightning code is compiled into the binary. `tests/mint.rs`
+runs the ecash sale against an in-process cdk mint (a dev-dependency whose
+signatory compiles gRPC code), so `cargo test` needs `protoc`.
 
 ## Operate
 
@@ -144,6 +146,37 @@ transport `specs/transports-v2/http.md`):
 Fresh invoices are limited per client address and globally. Money lands in
 the node's channel balance (not in the Cashu wallet); `bpir-issuer
 settlement` is unaffected. The web client still uses the Cashu flow.
+
+### Ecash: `POST /v2/x402/ecash`
+
+The same rail sells plain Cashu ecash from the issuer's wallet (first mint
+in `mints`). The body is `{"sat": 1000, "outputs": [{"amount": 8, "id":
+"<keyset id>", "B_": "<66 hex>"}, …]}`: 1 to 256 NUT-00 blinded outputs of
+the mint's active `sat` keyset, powers of two it signs, distinct `B_`,
+summing to `sat` within `[x402] ecash_min_sat`..`ecash_max_sat` (defaults 10
+and 20000); anything else is `400 invalid_request`.
+
+1. Without `PAYMENT-SIGNATURE`: the `402` challenge above for `sat × 1000`
+   msat, bound to this path and body, or `503 float_exhausted` when the
+   wallet cannot cover `sat` plus the mint's input fee.
+2. The paid, byte-identical retry settles as above. The issuer records
+   `x402_ecash_pending` under the payment, reserves proofs worth exactly
+   `sat` plus their input fee (one ordinary wallet swap makes change first
+   when it lacks the denominations), swaps them at the mint into exactly the
+   client's outputs, records `x402_ecash_issued`, and answers
+   `{"signatures": [{"amount", "id", "C_", "dleq": {"e", "s"}}, …]}` (NUT-00
+   blind signatures with NUT-12 DLEQ, in output order) with
+   `PAYMENT-RESPONSE`. The client unblinds them; the issuer never sees the
+   proofs it sold. An identical retry replays the stored signatures.
+3. If the mint cannot be reached or the outcome is unknown after settlement,
+   the answer is `503 retry` and the record stays pending (the reserved
+   inputs stay pending in the wallet). The next identical retry asks the
+   mint first (NUT-09 restore): outputs it already signed are answered and
+   the inputs marked spent; otherwise the inputs are checked (NUT-07) and the
+   swap is made again.
+
+Sales draw down the Cashu wallet (`bpir-issuer balance`); keep it topped up.
+
 ## `bpir-cln-rpc-guard` (workspace member `cln-rpc-guard/`)
 
 The issuer never opens the Core Lightning socket. For x402 (`exact/lnbtc`)
@@ -167,6 +200,7 @@ Unit: `deploy/bpir-cln-rpc-guard.service` (`User=` its own account,
 ```
 src/config.rs   TOML config and validation, seed-file reader
 src/cashu.rs    token summary, idempotency key, Swapper trait, cdk implementation
+src/ecash.rs    x402 ecash sale: request checks, EcashSeller trait, cdk implementation
 src/issuer_key.rs  the Ed25519 key that signs redeem answers
 src/arc.rs      ARC credential issuance and presentation verification
 src/redeem.rs   POST /v2/redeem verification, replay index, settlement ledger
@@ -174,6 +208,7 @@ src/store.rs    JSON-lines idempotency/audit store
 src/api.rs      axum router, handlers, contract error codes
 src/main.rs     CLI
 tests/api.rs    contract tests with a scripted fake mint
+tests/mint.rs   ecash sales against an in-process cdk mint
 ```
 
 License: MIT OR Apache-2.0.

@@ -167,6 +167,34 @@ impl CdkSwapper {
         Ok(Self { wallets, timeout })
     }
 
+    /// The wallet of one accepted (mint, unit); clones share the database.
+    pub fn wallet(&self, mint: &str, unit: &str) -> Option<Wallet> {
+        self.wallets
+            .get(&(mint.trim_end_matches('/').to_string(), unit.to_string()))
+            .cloned()
+    }
+
+    /// Finishes wallet operations a crash or a timeout interrupted (`cdk`
+    /// sagas: receives, and the change swaps of [`crate::ecash::CdkSeller`]),
+    /// as `cdk` asks every wallet to do at startup. Needs the mint; whatever
+    /// cannot be finished now is logged and tried again at the next start.
+    pub async fn recover(&self) {
+        for ((mint, unit), wallet) in &self.wallets {
+            match tokio::time::timeout(self.timeout, wallet.recover_incomplete_sagas()).await {
+                Ok(Ok(report)) if report.is_empty() => {}
+                Ok(Ok(report)) => {
+                    tracing::info!(%mint, %unit, ?report, "wallet: interrupted operations recovered");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(%mint, %unit, error = %e, "wallet: recovering interrupted operations failed");
+                }
+                Err(_) => {
+                    tracing::warn!(%mint, %unit, "wallet: recovering interrupted operations timed out");
+                }
+            }
+        }
+    }
+
     /// Total proofs held per (mint, unit), for the operator's `balance` command.
     pub async fn balances(&self) -> Vec<((String, String), Result<u64, String>)> {
         let mut out = Vec::new();

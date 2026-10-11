@@ -1,6 +1,6 @@
 //! HTTP layer: `GET /v2/info`, `POST /v2/credentials` and `POST /v2/redeem`
-//! as `docs/CREDITS.md` specifies, plus `GET /healthz` for the process
-//! supervisor.
+//! as `docs/CREDITS.md` specifies, the x402 ecash sale `POST /v2/x402/ecash`,
+//! plus `GET /healthz` for the process supervisor.
 
 use std::sync::Arc;
 
@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -26,11 +27,12 @@ use crate::arc::{ArcError, ArcIssuer};
 
 use crate::cashu::{token_key, SwapError, Swapper, TokenSummary};
 use crate::config::Config;
+use crate::ecash::{self, EcashRequest, EcashSeller, EcashSignature, SellError};
 use crate::issuer_key::IssuerKey;
 use crate::redeem::{verify_request, RedeemEvent, RedeemStore};
 use crate::store::{State as TokenState, Store};
 use crate::x402::facilitator::Settled;
-use crate::x402::server::{ChallengeError, X402State};
+use crate::x402::server::{BoundRequest, ChallengeError, X402State, CREDENTIALS_PATH, ECASH_PATH};
 use crate::x402::{self, header_value, parse_header, PaymentPayload, SettlementResponse};
 
 /// x402 HTTP transport headers (`specs/transports-v2/http.md`).
@@ -45,6 +47,9 @@ pub struct AppState {
     pub config: Config,
     pub issuer: IssuerKey,
     pub swapper: Box<dyn Swapper>,
+    /// Sells the issuer's own ecash into client outputs
+    /// (`POST /v2/x402/ecash`).
+    pub seller: Box<dyn EcashSeller>,
     /// One mutex around the store serializes token handling; the swap is
     /// awaited under it so two concurrent requests for the same token cannot
     /// both reach the mint. Throughput is bounded by mint latency, which is
@@ -139,6 +144,12 @@ impl ApiError {
     pub fn double_spend(message: impl Into<String>) -> Self {
         Self::new(StatusCode::PAYMENT_REQUIRED, "double_spend", message)
     }
+    pub fn float_exhausted(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "float_exhausted", message)
+    }
+    pub fn retry(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "retry", message)
+    }
 }
 
 impl From<ArcError> for ApiError {
@@ -178,6 +189,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/v2/info", get(info_v2))
         .route("/v2/credentials", post(credentials))
+        .route("/v2/x402/ecash", post(x402_ecash))
         .route("/v2/x402/invoices/{payment_hash}", get(x402_invoice_status))
         .route("/v2/redeem", post(redeem))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
@@ -292,7 +304,11 @@ async fn redeem(
                             "this token already bought an ARC credential",
                         ));
                     }
-                    Some(TokenState::X402Credentialed { .. }) => {
+                    Some(
+                        TokenState::X402Credentialed { .. }
+                        | TokenState::X402EcashPending { .. }
+                        | TokenState::X402EcashIssued { .. },
+                    ) => {
                         return Err(ApiError::already_redeemed(
                             "this key belongs to an x402 payment",
                         ));
@@ -528,7 +544,11 @@ async fn credentials_cashu(
                 "this token was already redeemed through {server_id}"
             )));
         }
-        Some(TokenState::X402Credentialed { .. }) => {
+        Some(
+            TokenState::X402Credentialed { .. }
+            | TokenState::X402EcashPending { .. }
+            | TokenState::X402EcashIssued { .. },
+        ) => {
             return Err(ApiError::already_redeemed(
                 "this key belongs to an x402 payment",
             ));
@@ -653,47 +673,16 @@ async fn credentials_x402(
         )));
     }
     let request_hex = hex::encode(&request_bytes);
-    let bound = x.bind(&headers, &body).map_err(ApiError::invalid_request)?;
+    let bound = x
+        .bind(CREDENTIALS_PATH, &headers, &body)
+        .map_err(ApiError::invalid_request)?;
     let now = (state.clock)();
 
     let Some(signature) = headers.get(&PAYMENT_SIGNATURE) else {
-        let ip = client_ip(&headers);
-        let required = match x
-            .challenge(&bound, request.credits, request.sat, now, &ip)
-            .await
-        {
-            Ok(required) => required,
-            Err(ChallengeError::RateLimited) => {
-                return Err(ApiError::rate_limited(
-                    "too many fresh invoices from this address; retry in a minute",
-                ));
-            }
-            Err(ChallengeError::Receiver(e)) => {
-                tracing::warn!(error = %e, "x402: receiver unavailable");
-                return Err(ApiError::receiver_unavailable(
-                    "the Lightning receiver is unavailable; retry later",
-                ));
-            }
-            Err(ChallengeError::Invalid(reason)) => {
-                tracing::error!(
-                    reason,
-                    "x402: the receiver's invoice fails our own checks; check x402.node_pubkey_hex"
-                );
-                return Err(ApiError::internal("receiver invoice rejected"));
-            }
-        };
-        return Ok((
-            StatusCode::PAYMENT_REQUIRED,
-            [(PAYMENT_REQUIRED, header_value(&required))],
-            Json(required),
-        )
-            .into_response());
+        let description = format!("BitcoinPIR credential pack: {} credits", request.credits);
+        return x402_challenge(x, &bound, description, request.sat, now, &headers).await;
     };
-    let signature = signature
-        .to_str()
-        .map_err(|_| ApiError::invalid_request("PAYMENT-SIGNATURE is not ASCII"))?;
-    let payload: PaymentPayload = parse_header(signature)
-        .map_err(|e| ApiError::invalid_request(format!("PAYMENT-SIGNATURE: {e}")))?;
+    let payload = payment_payload(signature)?;
     let network = x.network.caip2();
     let settled = match x.settle(&bound, request.sat, &payload, now) {
         Ok(settled) => settled,
@@ -754,6 +743,284 @@ fn credential_response(
     response_hex: String,
     settled: &Settled,
 ) -> Response {
+    paid(
+        settled,
+        CredentialResponseV2 {
+            response_hex,
+            epoch,
+            presentation_limit: arc.presentation_limit(),
+            issuer_public_key_hex: arc.public_key_hex(epoch),
+            valid_until: arc.valid_until(epoch),
+        },
+    )
+}
+
+/// `POST /v2/x402/ecash` answer: the mint's blind signatures on the request's
+/// outputs, in output order.
+#[derive(Serialize)]
+struct EcashResponse {
+    signatures: Vec<EcashSignature>,
+}
+
+/// `POST /v2/x402/ecash` (x402 `exact/lnbtc`, `crate::ecash`): Cashu ecash
+/// for Lightning. The body names `sat` and the client's blinded outputs;
+/// without `PAYMENT-SIGNATURE` it is answered `402` with an invoice bound to
+/// it, or `503 float_exhausted` when the issuer's wallet cannot cover the
+/// sale. On the paid retry of the identical bytes the issuer swaps its own
+/// proofs into exactly those outputs at the mint and answers the blind
+/// signatures. One payment buys one set of signatures: an identical retry
+/// replays them, a paid sale answered `503 retry` is finished by the next
+/// identical retry (NUT-09 restore first), and another body with the same
+/// payment is `duplicate_settlement`.
+async fn x402_ecash(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let Some(x) = state.x402.as_ref() else {
+        return Err(ApiError::unsupported_kind(
+            "x402 is not enabled on this issuer",
+        ));
+    };
+    let request: EcashRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::invalid_request(format!("body: {e}")))?;
+    let (min_sat, max_sat) = (x.config.ecash_min_sat, x.config.ecash_max_sat);
+    // Before anything prices `sat` (the paid path settles before `check`).
+    ecash::check_sat(request.sat, min_sat, max_sat).map_err(ApiError::invalid_request)?;
+    let bound = x
+        .bind(ECASH_PATH, &headers, &body)
+        .map_err(ApiError::invalid_request)?;
+    let now = (state.clock)();
+
+    let Some(signature) = headers.get(&PAYMENT_SIGNATURE) else {
+        let keyset = state.seller.keyset().await.map_err(|e| {
+            tracing::warn!(error = %e, "x402: mint keyset unavailable");
+            ApiError::mint_unavailable("the mint is unavailable; retry later")
+        })?;
+        ecash::check(&request, &keyset, min_sat, max_sat).map_err(ApiError::invalid_request)?;
+        let Some(cost) = ecash::input_total(request.sat, &keyset) else {
+            return Err(ApiError::invalid_request(format!(
+                "{} sat cannot be paid with exact inputs at the mint's input fee",
+                request.sat
+            )));
+        };
+        let float = state
+            .seller
+            .spendable()
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        if float < cost {
+            tracing::warn!(
+                sat = request.sat,
+                cost,
+                float,
+                "x402: the ecash float cannot cover a sale"
+            );
+            return Err(ApiError::float_exhausted(
+                "the issuer cannot sell this much ecash right now; try less or later",
+            ));
+        }
+        let description = format!("BitcoinPIR ecash: {} sat", request.sat);
+        return x402_challenge(x, &bound, description, request.sat, now, &headers).await;
+    };
+    let payload = payment_payload(signature)?;
+    let network = x.network.caip2();
+    let settled = match x.settle(&bound, request.sat, &payload, now) {
+        Ok(settled) => settled,
+        Err(reason) => {
+            tracing::info!(reason, "x402: settlement refused");
+            return Ok(payment_failed(network, reason));
+        }
+    };
+    let body_sha256_hex = hex::encode(Sha256::digest(&body));
+    let key = format!("x402:{}", settled.replay_key);
+    let sale = settled.replay_key.as_str();
+    let mut store = state.store.lock().await;
+    let resume = match store.get(&key) {
+        Some(TokenState::X402EcashIssued {
+            body_sha256_hex: stored,
+            signatures,
+            ..
+        }) if *stored == body_sha256_hex => {
+            tracing::info!(
+                payment_hash = %settled.payment_hash_hex,
+                "x402: replaying ecash signatures for a payment seen before"
+            );
+            let signatures = signatures.clone();
+            return Ok(paid(&settled, EcashResponse { signatures }));
+        }
+        Some(TokenState::X402EcashPending {
+            body_sha256_hex: stored,
+            ..
+        }) if *stored == body_sha256_hex => true,
+        Some(_) => return Ok(payment_failed(network, "duplicate_settlement")),
+        None => false,
+    };
+    let outputs = if resume {
+        // An earlier attempt may have been signed (before a keyset rotation,
+        // even): ask the mint before checking against today's keyset.
+        let outputs = ecash::blinded_messages(&request).map_err(ApiError::invalid_request)?;
+        match state.seller.restore(sale, &outputs).await {
+            Ok(Some(signatures)) => {
+                return sold(&mut store, &key, &settled, body_sha256_hex, &signatures);
+            }
+            Ok(None) => {}
+            Err(e) => return Err(unfinished(&settled, &e)),
+        }
+        let keyset = state
+            .seller
+            .keyset()
+            .await
+            .map_err(|e| unfinished(&settled, &e))?;
+        ecash::check(&request, &keyset, min_sat, max_sat).map_err(|reason| {
+            tracing::error!(
+                payment_hash = %settled.payment_hash_hex,
+                reason,
+                "x402: a paid ecash sale no longer passes the checks; refund it manually"
+            );
+            ApiError::invalid_request(reason)
+        })?;
+        outputs
+    } else {
+        let keyset = state
+            .seller
+            .keyset()
+            .await
+            .map_err(|e| unfinished(&settled, &e))?;
+        let outputs =
+            ecash::check(&request, &keyset, min_sat, max_sat).map_err(ApiError::invalid_request)?;
+        store
+            .record(
+                &key,
+                TokenState::X402EcashPending {
+                    network: network.to_owned(),
+                    payment_hash_hex: settled.payment_hash_hex.clone(),
+                    msat: settled.amount_msat,
+                    body_sha256_hex: body_sha256_hex.clone(),
+                },
+            )
+            .map_err(|e| ApiError::internal(format!("store: {e}")))?;
+        outputs
+    };
+    let signatures = match state.seller.sell(sale, request.sat, &outputs).await {
+        Ok(signatures) => signatures,
+        Err(SellError::AlreadySigned) => match state.seller.restore(sale, &outputs).await {
+            Ok(Some(signatures)) => signatures,
+            Ok(None) => {
+                let e = SellError::Unknown(
+                    "the mint holds the outputs but has not signed them yet".into(),
+                );
+                return Err(unfinished(&settled, &e));
+            }
+            Err(e) => return Err(unfinished(&settled, &e)),
+        },
+        Err(e) => return Err(unfinished(&settled, &e)),
+    };
+    sold(&mut store, &key, &settled, body_sha256_hex, &signatures)
+}
+
+/// Records a finished sale and answers its signatures.
+fn sold(
+    store: &mut Store,
+    key: &str,
+    settled: &Settled,
+    body_sha256_hex: String,
+    signatures: &[cdk::nuts::BlindSignature],
+) -> Result<Response, ApiError> {
+    let signatures: Vec<EcashSignature> = signatures.iter().map(EcashSignature::from).collect();
+    store
+        .record(
+            key,
+            TokenState::X402EcashIssued {
+                network: settled.network.caip2().to_owned(),
+                payment_hash_hex: settled.payment_hash_hex.clone(),
+                msat: settled.amount_msat,
+                body_sha256_hex,
+                signatures: signatures.clone(),
+            },
+        )
+        .map_err(|e| ApiError::internal(format!("store: {e}")))?;
+    tracing::info!(
+        msat = settled.amount_msat,
+        outputs = signatures.len(),
+        payment_hash = %settled.payment_hash_hex,
+        "x402: ecash sold"
+    );
+    Ok(paid(settled, EcashResponse { signatures }))
+}
+
+/// A paid sale that did not finish: `503 retry`. The pending record stays,
+/// so the identical retry picks the sale up where it stopped.
+fn unfinished(settled: &Settled, error: &SellError) -> ApiError {
+    match error {
+        SellError::Unavailable(_) | SellError::Unknown(_) => tracing::warn!(
+            payment_hash = %settled.payment_hash_hex,
+            %error,
+            "x402: ecash sale unfinished; the identical retry resumes it"
+        ),
+        SellError::Float(_) | SellError::Rejected(_) | SellError::AlreadySigned => tracing::error!(
+            payment_hash = %settled.payment_hash_hex,
+            %error,
+            "x402: a paid ecash sale cannot finish; top up the wallet or reconcile"
+        ),
+    }
+    ApiError::retry(format!(
+        "paid, but the sale did not finish ({error}); retry the identical request"
+    ))
+}
+
+/// The `402` challenge for a bound request: a fresh invoice for `sat` in
+/// `PAYMENT-REQUIRED` and in the body.
+async fn x402_challenge(
+    x: &X402State,
+    bound: &BoundRequest,
+    description: String,
+    sat: u64,
+    now: u64,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let ip = client_ip(headers);
+    let required = match x.challenge(bound, description, sat, now, &ip).await {
+        Ok(required) => required,
+        Err(ChallengeError::RateLimited) => {
+            return Err(ApiError::rate_limited(
+                "too many fresh invoices from this address; retry in a minute",
+            ));
+        }
+        Err(ChallengeError::Receiver(e)) => {
+            tracing::warn!(error = %e, "x402: receiver unavailable");
+            return Err(ApiError::receiver_unavailable(
+                "the Lightning receiver is unavailable; retry later",
+            ));
+        }
+        Err(ChallengeError::Invalid(reason)) => {
+            tracing::error!(
+                reason,
+                "x402: the receiver's invoice fails our own checks; check x402.node_pubkey_hex"
+            );
+            return Err(ApiError::internal("receiver invoice rejected"));
+        }
+    };
+    Ok((
+        StatusCode::PAYMENT_REQUIRED,
+        [(PAYMENT_REQUIRED, header_value(&required))],
+        Json(required),
+    )
+        .into_response())
+}
+
+/// The `PaymentPayload` a paid retry carries in `PAYMENT-SIGNATURE`.
+fn payment_payload(signature: &HeaderValue) -> Result<PaymentPayload, ApiError> {
+    let signature = signature
+        .to_str()
+        .map_err(|_| ApiError::invalid_request("PAYMENT-SIGNATURE is not ASCII"))?;
+    parse_header(signature)
+        .map_err(|e| ApiError::invalid_request(format!("PAYMENT-SIGNATURE: {e}")))
+}
+
+/// `200` with the settlement in `PAYMENT-RESPONSE` (`transaction` = the
+/// payment hash, no `payer`).
+fn paid(settled: &Settled, body: impl Serialize) -> Response {
     let settlement = SettlementResponse {
         success: true,
         error_reason: None,
@@ -763,13 +1030,7 @@ fn credential_response(
     (
         StatusCode::OK,
         [(PAYMENT_RESPONSE, header_value(&settlement))],
-        Json(CredentialResponseV2 {
-            response_hex,
-            epoch,
-            presentation_limit: arc.presentation_limit(),
-            issuer_public_key_hex: arc.public_key_hex(epoch),
-            valid_until: arc.valid_until(epoch),
-        }),
+        Json(body),
     )
         .into_response()
 }
