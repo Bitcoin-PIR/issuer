@@ -8,7 +8,6 @@
 //! bpir-issuer balance --config config.toml      # ecash held per (mint, unit)
 //! bpir-issuer mnemonic --out mint.seed          # BIP39 phrase for cdk-mintd --seed-file
 //! bpir-issuer settlement --config config.toml   # gas and sat redeemed per PIR server
-//! bpir-issuer arc-seed --out arc.seed           # ARC master seed (per-epoch issuer keys)
 //! ```
 
 use std::path::PathBuf;
@@ -19,7 +18,6 @@ use clap::{Parser, Subcommand};
 use tokio::sync::Mutex;
 
 use bpir_issuer::api::{build_router, AppState};
-use bpir_issuer::arc::ArcIssuer;
 use bpir_issuer::cashu::CdkSwapper;
 use bpir_issuer::config::{read_seed_file, Config};
 use bpir_issuer::ecash::CdkSeller;
@@ -27,7 +25,7 @@ use bpir_issuer::issuer_key::IssuerKey;
 use bpir_issuer::redeem::RedeemStore;
 use bpir_issuer::store::Store;
 use bpir_issuer::x402::receiver::GuardReceiver;
-use bpir_issuer::x402::server::{X402State, CREDENTIALS_PATH, ECASH_PATH};
+use bpir_issuer::x402::server::{X402State, ECASH_PATH};
 
 #[derive(Parser)]
 #[command(
@@ -72,12 +70,6 @@ enum Command {
     Settlement {
         #[arg(long)]
         config: PathBuf,
-    },
-    /// Generate the 32-byte ARC master seed (mode 0600); every epoch's
-    /// issuer keys derive from it. Back it up: it is the credentials.
-    ArcSeed {
-        #[arg(long)]
-        out: PathBuf,
     },
     /// Generate a BIP39 mnemonic (24 words, 256-bit entropy) into a mode-0400
     /// file, for a mint's `--seed-file`. The phrase is never printed.
@@ -126,8 +118,8 @@ fn load_wallet_seed(path: &std::path::Path) -> anyhow::Result<[u8; 64]> {
     Ok(out)
 }
 
-/// Wallet units: the `/v2` paths (Cashu items on `/v2/redeem`,
-/// `/v2/credentials`) take sat tokens only.
+/// Wallet units: the `/v2` paths (Cashu items on `/v2/redeem`, ecash sales
+/// on `/v2/x402/ecash`) take sat only.
 fn wallet_units() -> Vec<String> {
     vec!["sat".to_string()]
 }
@@ -199,15 +191,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::ArcSeed { out } => {
-            let mut seed = zeroize::Zeroizing::new([0u8; 32]);
-            getrandom::getrandom(seed.as_mut()).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
-            write_secret(&out, seed.as_ref())?;
-            eprintln!(
-                "wrote ARC master seed (32 bytes, mode 0600) to {}",
-                out.display()
-            );
-        }
         Command::Settlement { config } => {
             let config = Config::load(&config)?;
             let store = RedeemStore::open(&config.redeem_store_path())?;
@@ -243,18 +226,6 @@ async fn main() -> anyhow::Result<()> {
             let store = Store::open(&config.store_path)?;
             let redeem_store = RedeemStore::open(&config.redeem_store_path())?;
             let operator_keys = config.operator_keys();
-            let arc = match &config.arc {
-                Some(arc_config) => {
-                    let seed = zeroize::Zeroizing::new(load_seed32(&arc_config.seed_path)?);
-                    Some(ArcIssuer::new(
-                        *seed,
-                        arc_config.epoch_secs,
-                        arc_config.grace_secs,
-                        arc_config.presentation_limit,
-                    ))
-                }
-                None => None,
-            };
             if operator_keys.is_empty() {
                 tracing::warn!("operator_pubkeys is empty: POST /v2/redeem refuses every server");
             }
@@ -270,7 +241,6 @@ async fn main() -> anyhow::Result<()> {
                 store = %store.path().display(),
                 redeem_store = %redeem_store.path().display(),
                 operator_keys = operator_keys.len(),
-                arc = arc.is_some(),
                 "bpir-issuer starting"
             );
             let x402 = match &config.x402 {
@@ -284,14 +254,13 @@ async fn main() -> anyhow::Result<()> {
                     tracing::info!(
                         network = state.network.caip2(),
                         pay_to = %x402_config.node_pubkey_hex,
-                        resource = %state.resource_url(CREDENTIALS_PATH),
                         ecash = %state.resource_url(ECASH_PATH),
                         ecash_mint = %config.mints[0],
                         ecash_min_sat = x402_config.ecash_min_sat,
                         ecash_max_sat = x402_config.ecash_max_sat,
                         guard = %x402_config.guard_socket.display(),
                         max_timeout_secs = x402_config.max_timeout_secs,
-                        "x402 exact/lnbtc enabled on POST /v2/credentials and POST /v2/x402/ecash"
+                        "x402 exact/lnbtc enabled on POST /v2/x402/ecash"
                     );
                     Some(state)
                 }
@@ -306,7 +275,6 @@ async fn main() -> anyhow::Result<()> {
                 store: Mutex::new(store),
                 redeem_store: Mutex::new(redeem_store),
                 operator_keys,
-                arc,
                 x402,
                 clock: Box::new(bpir_issuer::unix_now),
             });

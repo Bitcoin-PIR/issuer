@@ -9,14 +9,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use arc::create_credential_request;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use bpir_issuer::api::{build_router, AppState};
-use bpir_issuer::arc::ArcIssuer;
 use bpir_issuer::cashu::{SwapError, Swapper, TokenSummary};
 use bpir_issuer::config::{Config, X402Config};
 use bpir_issuer::ecash::{EcashSeller, SaleKeyset, SellError};
@@ -37,7 +35,6 @@ use cdk::nuts::{
 use cdk::Amount;
 use http_body_util::BodyExt;
 use lightning_invoice::{Bolt11Invoice, Currency, InvoiceBuilder, PaymentSecret};
-use pir_credit::arc::{epoch_at, request_context};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -47,8 +44,6 @@ const KEY_ONE_PUBKEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d9
 const PUBLIC_URL: &str = "https://issuer.example";
 const KEYSET_ID: &str = "009a1f293253e41e";
 static CLOCK: AtomicU64 = AtomicU64::new(1_800_000_000);
-const ARC_EPOCH: u64 = 90 * 86_400;
-const ARC_GRACE: u64 = 30 * 86_400;
 
 fn sign_invoice(description: &str, amount_msat: u64, expiry: u64, preimage: &[u8; 32]) -> String {
     let secp = Secp256k1::new();
@@ -324,12 +319,6 @@ fn harness() -> Harness {
         wallet_db_path = "{0}/wallet.sqlite"
         store_path = "{0}/grants.jsonl"
         mints = ["https://mint.example"]
-        [arc]
-        seed_path = "{0}/arc.seed"
-        presentation_limit = 4
-        [[arc.credential_offers]]
-        credits = 4
-        sat = 40
         [x402]
         guard_socket = "{0}/guard.sock"
         node_pubkey_hex = "{KEY_ONE_PUBKEY}"
@@ -356,7 +345,6 @@ fn harness() -> Harness {
         store: Mutex::new(store),
         redeem_store: Mutex::new(redeem_store),
         operator_keys: vec![],
-        arc: Some(ArcIssuer::new([9u8; 32], ARC_EPOCH, ARC_GRACE, 4)),
         x402: Some(x402),
         clock: Box::new(|| CLOCK.load(Ordering::SeqCst)),
     });
@@ -387,14 +375,6 @@ impl InvoiceSource for SharedReceiver {
     async fn lookup(&self, payment_hash_hex: &str) -> Result<Option<InvoiceState>, ReceiverError> {
         self.0.lookup(payment_hash_hex).await
     }
-}
-
-async fn post(
-    app: &axum::Router,
-    body: &str,
-    extra: &[(&str, String)],
-) -> (StatusCode, axum::http::HeaderMap, Value) {
-    post_to(app, "/v2/credentials", body, extra).await
 }
 
 async fn post_to(
@@ -442,30 +422,19 @@ async fn get(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     )
 }
 
-fn body_for(request_hex: &str) -> String {
-    json!({ "credits": 4, "sat": 40, "request_hex": request_hex }).to_string()
-}
-
 #[tokio::test]
-async fn challenge_pay_and_settle_issue_one_credential_per_payment() {
+async fn challenge_pay_and_settle_follow_the_exact_lnbtc_scheme() {
     let h = harness();
-    let now = CLOCK.load(Ordering::SeqCst);
-    let epoch = epoch_at(now, ARC_EPOCH);
-    let (_secrets, request) =
-        create_credential_request(&request_context(epoch), &mut rand_core::OsRng).unwrap();
-    let body = body_for(&hex::encode(request.to_bytes()));
+    let (outputs, body) = ecash_body(40);
 
-    // 1. No token, no signature: a 402 with a request-bound invoice.
-    let (status, headers, json_body) = post(&h.app, &body, &[]).await;
+    // 1. No signature: a 402 with a request-bound invoice.
+    let (status, headers, json_body) = post_to(&h.app, ECASH, &body, &[]).await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{json_body}");
     let required: PaymentRequired =
         parse_header(headers["payment-required"].to_str().unwrap()).unwrap();
     assert_eq!(serde_json::to_value(&required).unwrap(), json_body);
     assert_eq!(required.x402_version, 2);
-    assert_eq!(
-        required.resource.url,
-        format!("{PUBLIC_URL}/v2/credentials")
-    );
+    assert_eq!(required.resource.url, format!("{PUBLIC_URL}{ECASH}"));
     let accepted = required.accepts[0].clone();
     assert_eq!(accepted.scheme, "exact");
     assert_eq!(accepted.network, "lnbtc:000000000019d6689c085ae165831e93");
@@ -481,7 +450,7 @@ async fn challenge_pay_and_settle_issue_one_credential_per_payment() {
     );
     let expected = http1(
         "POST",
-        &format!("{PUBLIC_URL}/v2/credentials"),
+        &format!("{PUBLIC_URL}{ECASH}"),
         body.as_bytes(),
         &[BoundHeader {
             name: "content-type",
@@ -515,33 +484,24 @@ async fn challenge_pay_and_settle_issue_one_credential_per_payment() {
         payload: serde_json::from_value(json!({ "preimage": preimage })).unwrap(),
     };
     let signature = header_value(&payload);
-    let (status, headers, issued) =
-        post(&h.app, &body, &[("payment-signature", signature.clone())]).await;
-    assert_eq!(status, StatusCode::OK, "{issued}");
+    let paid = [("payment-signature", signature.clone())];
+    let (status, headers, sold) = post_to(&h.app, ECASH, &body, &paid).await;
+    assert_eq!(status, StatusCode::OK, "{sold}");
     let settlement: SettlementResponse =
         parse_header(headers["payment-response"].to_str().unwrap()).unwrap();
     assert!(settlement.success);
     assert_eq!(settlement.transaction, payment_hash);
     assert_eq!(settlement.network, accepted.network);
-    assert_eq!(issued["epoch"], epoch);
-    assert_eq!(issued["presentation_limit"], 4);
-    assert!(issued["response_hex"].as_str().unwrap().len() > 64);
+    assert_eq!(sold["signatures"].as_array().unwrap().len(), outputs.len());
 
     // 3. The identical retry replays the stored answer.
-    let (status, _, again) = post(&h.app, &body, &[("payment-signature", signature.clone())]).await;
+    let (status, _, again) = post_to(&h.app, ECASH, &body, &paid).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(again, issued);
+    assert_eq!(again, sold);
 
     // 4. The same proof with another request: the binding differs.
-    let (_, other) =
-        create_credential_request(&request_context(epoch), &mut rand_core::OsRng).unwrap();
-    let other_body = body_for(&hex::encode(other.to_bytes()));
-    let (status, headers, refused) = post(
-        &h.app,
-        &other_body,
-        &[("payment-signature", signature.clone())],
-    )
-    .await;
+    let (_, other_body) = ecash_body(40);
+    let (status, headers, refused) = post_to(&h.app, ECASH, &other_body, &paid).await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{refused}");
     let failure: SettlementResponse =
         parse_header(headers["payment-response"].to_str().unwrap()).unwrap();
@@ -554,8 +514,9 @@ async fn challenge_pay_and_settle_issue_one_credential_per_payment() {
     // 5. A wrong preimage for the right request.
     let mut wrong = payload.clone();
     wrong.payload["preimage"] = json!("ab".repeat(32));
-    let (status, headers, _) = post(
+    let (status, headers, _) = post_to(
         &h.app,
+        ECASH,
         &body,
         &[("payment-signature", header_value(&wrong))],
     )
@@ -595,38 +556,26 @@ async fn status_hides_foreign_invoices_and_rejects_bad_hashes() {
 #[tokio::test]
 async fn challenges_are_rate_limited_per_address_and_signatures_must_decode() {
     let h = harness();
-    let now = CLOCK.load(Ordering::SeqCst);
-    let (_, request) = create_credential_request(
-        &request_context(epoch_at(now, ARC_EPOCH)),
-        &mut rand_core::OsRng,
-    )
-    .unwrap();
-    let body = body_for(&hex::encode(request.to_bytes()));
+    let (_, body) = ecash_body(40);
     let ip = [("cf-connecting-ip", "203.0.113.7".to_owned())];
     for _ in 0..2 {
-        let (status, _, _) = post(&h.app, &body, &ip).await;
+        let (status, _, _) = post_to(&h.app, ECASH, &body, &ip).await;
         assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
     }
-    let (status, _, refused) = post(&h.app, &body, &ip).await;
+    let (status, _, refused) = post_to(&h.app, ECASH, &body, &ip).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{refused}");
     // Another address still gets a challenge.
-    let (status, _, _) = post(
+    let (status, _, _) = post_to(
         &h.app,
+        ECASH,
         &body,
         &[("cf-connecting-ip", "203.0.113.8".to_owned())],
     )
     .await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
     // A signature that is not base64 JSON is a 400, not a settlement failure.
-    let (status, _, _) = post(&h.app, &body, &[("payment-signature", "!!!".to_owned())]).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    // A pack that is not on sale.
-    let (status, _, _) = post(
-        &h.app,
-        &json!({"credits": 5, "sat": 40, "request_hex": "00"}).to_string(),
-        &[],
-    )
-    .await;
+    let signed = [("payment-signature", "!!!".to_owned())];
+    let (status, _, _) = post_to(&h.app, ECASH, &body, &signed).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 

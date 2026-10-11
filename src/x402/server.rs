@@ -1,7 +1,7 @@
-//! The resource-server side of the x402 resources (`POST /v2/credentials`,
-//! `POST /v2/x402/ecash`): binds the incoming request, asks the receiver for a
-//! request-bound invoice, checks it before publishing the challenge, and
-//! settles a paid retry through the facilitator logic.
+//! The resource-server side of the x402 resource (`POST /v2/x402/ecash`):
+//! binds the incoming request, asks the receiver for a request-bound invoice,
+//! checks it before publishing the challenge, and settles a paid retry
+//! through the facilitator logic.
 
 use super::binding::{self, Binding, BoundHeader};
 use super::facilitator::{self, Settled};
@@ -18,7 +18,6 @@ use serde_json::{json, Map, Value};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
-pub const CREDENTIALS_PATH: &str = "/v2/credentials";
 pub const ECASH_PATH: &str = "/v2/x402/ecash";
 
 pub struct X402State {

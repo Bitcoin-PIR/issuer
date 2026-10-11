@@ -53,8 +53,9 @@ pub enum State {
         mint: String,
         unit: String,
     },
-    /// The mint accepted the token presented to `POST /v2/credentials` and
-    /// an ARC credential was issued under `epoch` for `request_hex`.
+    /// Retired ARC path: the mint accepted the token and an ARC credential
+    /// was issued under `epoch` for `request_hex`. Only replayed from old
+    /// logs; the token counts as spent.
     Credentialed {
         epoch: u32,
         request_hex: String,
@@ -63,11 +64,10 @@ pub enum State {
         mint: String,
         unit: String,
     },
-    /// x402 `exact/lnbtc`: the Lightning payment with this hash was proven
-    /// (preimage) and an ARC credential issued under `epoch` for
-    /// `request_hex`. Keyed `x402:<network>:<payment_hash>`, which is also
-    /// the facilitator's replay entry: a second claim of the same payment is
-    /// `duplicate_settlement`.
+    /// Retired ARC path over x402 `exact/lnbtc`: the Lightning payment with
+    /// this hash was proven (preimage) and an ARC credential issued under
+    /// `epoch` for `request_hex`. Only replayed from old logs; the payment
+    /// counts as claimed.
     X402Credentialed {
         network: String,
         payment_hash_hex: String,
@@ -80,7 +80,9 @@ pub enum State {
     /// this hash was proven and is owed the blind signatures on the outputs
     /// of the request whose body hashes to `body_sha256_hex`. Recorded before
     /// the mint is contacted; the identical retry finishes the sale (NUT-09
-    /// restore first). Keyed like `X402Credentialed`.
+    /// restore first). Keyed `x402:<network>:<payment_hash>`, which is also
+    /// the facilitator's replay entry: a second claim of the same payment is
+    /// `duplicate_settlement`.
     X402EcashPending {
         network: String,
         payment_hash_hex: String,
