@@ -396,6 +396,12 @@ mod tests {
     }
 
     #[test]
+    fn example_config_loads() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        Config::load(&path).unwrap();
+    }
+
+    #[test]
     fn retired_arc_table_is_refused() {
         // ARC credentials are retired: the config loads once `[arc]` and
         // `[[arc.credential_offers]]` are deleted, and fails loudly at

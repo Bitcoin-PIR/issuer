@@ -17,14 +17,6 @@ mints = ["https://mint.example"]
 # Browser origins allowed by CORS (empty = any origin; no cookies are used).
 cors_origins = ["https://www.bitcoinpir.org", "https://bitcoinpir.org"]
 
-# Credits contract (docs/CREDITS.md in the main repository), published in
-# GET /v2/info and used to turn redeemed sats into gas. Defaults shown.
-[gas]
-credit_sat = 10
-gas_per_credit = 72000
-base_gas_per_frame = 20
-egress_gas_per_mb = 1000
-
 # Operator identity keys (64 hex) whose certified PIR servers may call
 # POST /v2/redeem. Empty refuses every server.
 operator_pubkeys = []
@@ -32,6 +24,14 @@ operator_pubkeys = []
 redeem_max_skew_secs = 300
 # Redemption log (replay index + settlement ledger); default: redeem.jsonl next to store_path.
 # redeem_store_path = "/var/lib/bitcoinpir-issuer/redeem.jsonl"
+
+# Credits contract (docs/CREDITS.md in the main repository), published in
+# GET /v2/info and used to turn redeemed sats into gas. Defaults shown.
+[gas]
+credit_sat = 10
+gas_per_credit = 72000
+base_gas_per_frame = 20
+egress_gas_per_mb = 1000
 
 # Worst-case prices shown to clients in GET /v2/info (informational). Defaults shown.
 [[rate_card]]
