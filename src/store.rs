@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ecash::EcashSignature;
+
 /// A v1 session grant, as issued before the grants were retired (2026-09).
 /// Kept so old log lines replay and their tokens stay spent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +75,27 @@ pub enum State {
         epoch: u32,
         request_hex: String,
         response_hex: String,
+    },
+    /// x402 `exact/lnbtc` for ecash (`POST /v2/x402/ecash`): the payment with
+    /// this hash was proven and is owed the blind signatures on the outputs
+    /// of the request whose body hashes to `body_sha256_hex`. Recorded before
+    /// the mint is contacted; the identical retry finishes the sale (NUT-09
+    /// restore first). Keyed like `X402Credentialed`.
+    X402EcashPending {
+        network: String,
+        payment_hash_hex: String,
+        msat: u64,
+        body_sha256_hex: String,
+    },
+    /// The sale went through: `signatures` are the mint's blind signatures
+    /// on the request's outputs, in output order, replayed to an identical
+    /// retry.
+    X402EcashIssued {
+        network: String,
+        payment_hash_hex: String,
+        msat: u64,
+        body_sha256_hex: String,
+        signatures: Vec<EcashSignature>,
     },
 }
 
@@ -219,6 +242,64 @@ mod tests {
         assert!(matches!(store.get("k3"), Some(State::Failed { .. })));
         assert_eq!(store.pending_keys(), vec!["k2".to_string()]);
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 4);
+    }
+
+    #[test]
+    fn x402_ecash_records_replay_next_to_older_lines() {
+        use crate::ecash::EcashDleq;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grants.jsonl");
+        // A line as the previous release wrote it.
+        std::fs::write(
+            &path,
+            "{\"token_key_hex\":\"x402:n:aa\",\"state\":\"x402_credentialed\",\"network\":\"n\",\"payment_hash_hex\":\"aa\",\"msat\":40000,\"epoch\":7,\"request_hex\":\"01\",\"response_hex\":\"02\"}\n",
+        )
+        .unwrap();
+        let pending = State::X402EcashPending {
+            network: "n".into(),
+            payment_hash_hex: "bb".into(),
+            msat: 10_000,
+            body_sha256_hex: "cc".repeat(32),
+        };
+        let issued = State::X402EcashIssued {
+            network: "n".into(),
+            payment_hash_hex: "bb".into(),
+            msat: 10_000,
+            body_sha256_hex: "cc".repeat(32),
+            signatures: vec![
+                EcashSignature {
+                    amount: 8,
+                    id: "009a1f293253e41e".into(),
+                    c: format!("02{}", "11".repeat(32)),
+                    dleq: Some(EcashDleq {
+                        e: "01".repeat(32),
+                        s: "02".repeat(32),
+                    }),
+                },
+                EcashSignature {
+                    amount: 2,
+                    id: "009a1f293253e41e".into(),
+                    c: format!("03{}", "22".repeat(32)),
+                    dleq: None,
+                },
+            ],
+        };
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.record("x402:n:bb", pending.clone()).unwrap();
+            store.record("x402:n:dd", pending.clone()).unwrap();
+            store.record("x402:n:bb", issued.clone()).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(matches!(
+            store.get("x402:n:aa"),
+            Some(State::X402Credentialed { epoch: 7, .. })
+        ));
+        assert_eq!(store.get("x402:n:bb"), Some(&issued));
+        assert_eq!(store.get("x402:n:dd"), Some(&pending));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"state\":\"x402_ecash_issued\""));
+        assert!(text.contains("\"C_\":\"02"));
     }
 
     #[test]

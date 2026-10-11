@@ -13,6 +13,7 @@ use bpir_issuer::api::{build_router, AppState};
 use bpir_issuer::arc::ArcIssuer;
 use bpir_issuer::cashu::{token_key, SwapError, Swapper, TokenSummary};
 use bpir_issuer::config::Config;
+use bpir_issuer::ecash::{EcashSeller, SaleKeyset, SellError};
 use bpir_issuer::issuer_key::IssuerKey;
 use bpir_issuer::redeem::RedeemStore;
 use bpir_issuer::store::{IssuedGrant, State as TokenState, Store};
@@ -50,6 +51,34 @@ impl Swapper for FakeSwapper {
             panic!("fake mint called more often than scripted");
         }
         script.remove(0)
+    }
+}
+
+/// Ecash sales are not exercised here (`tests/x402.rs` covers them).
+struct NoSeller;
+
+#[async_trait::async_trait]
+impl EcashSeller for NoSeller {
+    async fn keyset(&self) -> Result<SaleKeyset, SellError> {
+        Err(SellError::Unavailable("no mint in this test".into()))
+    }
+    async fn spendable(&self) -> Result<u64, SellError> {
+        Err(SellError::Unavailable("no mint in this test".into()))
+    }
+    async fn sell(
+        &self,
+        _: &str,
+        _: u64,
+        _: &[cdk::nuts::BlindedMessage],
+    ) -> Result<Vec<cdk::nuts::BlindSignature>, SellError> {
+        Err(SellError::Unavailable("no mint in this test".into()))
+    }
+    async fn restore(
+        &self,
+        _: &str,
+        _: &[cdk::nuts::BlindedMessage],
+    ) -> Result<Option<Vec<cdk::nuts::BlindSignature>>, SellError> {
+        Err(SellError::Unavailable("no mint in this test".into()))
     }
 }
 
@@ -98,6 +127,7 @@ fn harness_in(dir: tempfile::TempDir, script: Vec<Result<u64, SwapError>>) -> Ha
         config,
         issuer: IssuerKey::new(&[5u8; 32]),
         swapper: Box::new(FakeSwapper::new(script)),
+        seller: Box::new(NoSeller),
         store: Mutex::new(store),
         redeem_store: Mutex::new(redeem_store),
         operator_keys: vec![operator_key().verifying_key()],

@@ -60,8 +60,9 @@ credits = 2
 flow = "oram_single_address"
 credits = 1
 
-# x402 `exact/lnbtc` (Lightning) purchase rail for `POST /v2/credentials`.
-# Remove the table to keep the endpoint Cashu-only. The issuer talks to the
+# x402 `exact/lnbtc` (Lightning) purchase rail for `POST /v2/credentials` and
+# `POST /v2/x402/ecash`. Remove the table to turn it off (credentials stay
+# Cashu-only, ecash is not sold). The issuer talks to the
 # node only through `bpir-cln-rpc-guard` (invoice / listinvoices /
 # waitinvoice, bounded parameters); it never opens the node socket.
 # [x402]
@@ -76,3 +77,5 @@ credits = 1
 # bound_headers = ["content-type"]    # http:1 binding, lowercase ascending
 # invoices_per_minute_per_ip = 6
 # invoices_per_minute = 60
+# ecash_min_sat = 10                  # POST /v2/x402/ecash: smallest and largest sale
+# ecash_max_sat = 20000
