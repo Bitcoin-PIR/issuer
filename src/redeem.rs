@@ -10,7 +10,7 @@
 //! (same `(server_id, nonce)`, same signed answer) without touching the
 //! mint again.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -117,7 +117,9 @@ pub fn verify_request(
     })
 }
 
-/// One settled redemption, as the append-only redeem log records it.
+/// One settled redemption, as the append-only redeem log records it. Lines
+/// from the retired ARC credentials also carry `epoch` and `tags_hex`; they
+/// still replay (unknown fields are ignored).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedeemEvent {
     pub server_id: String,
@@ -127,12 +129,6 @@ pub struct RedeemEvent {
     pub sat_value: u64,
     pub items_accepted: u32,
     pub issuer_signature_hex: String,
-    /// Epoch of the ARC presentations this redemption consumed, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub epoch: Option<u32>,
-    /// Tags of the ARC presentations consumed (the double-spend set).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags_hex: Vec<String>,
 }
 
 impl RedeemEvent {
@@ -171,7 +167,6 @@ pub struct RedeemStore {
     file: File,
     answers: HashMap<(String, String), RedeemEvent>,
     totals: BTreeMap<String, ServerTotals>,
-    seen_tags: HashSet<(u32, String)>,
 }
 
 impl RedeemStore {
@@ -187,7 +182,6 @@ impl RedeemStore {
             file,
             answers: HashMap::new(),
             totals: BTreeMap::new(),
-            seen_tags: HashSet::new(),
         };
         let reader = BufReader::new(
             File::open(path).map_err(|e| RedeemStoreError::Open(path.to_path_buf(), e))?,
@@ -210,18 +204,8 @@ impl RedeemStore {
         totals.redemptions += 1;
         totals.gas = totals.gas.saturating_add(event.gas_added);
         totals.sat = totals.sat.saturating_add(event.sat_value);
-        if let Some(epoch) = event.epoch {
-            for tag in &event.tags_hex {
-                self.seen_tags.insert((epoch, tag.clone()));
-            }
-        }
         self.answers
             .insert((event.server_id.clone(), event.nonce_hex.clone()), event);
-    }
-
-    /// Whether an ARC tag was already consumed under `epoch`.
-    pub fn has_tag(&self, epoch: u32, tag_hex: &str) -> bool {
-        self.seen_tags.contains(&(epoch, tag_hex.to_owned()))
     }
 
     pub fn path(&self) -> &Path {
@@ -381,22 +365,23 @@ mod tests {
             sat_value: sat,
             items_accepted: 1,
             issuer_signature_hex: "00".repeat(64),
-            epoch: None,
-            tags_hex: Vec::new(),
         };
         {
             let mut store = RedeemStore::open(&path).unwrap();
             store.record(event("pir1", "aa", 72_000, 10)).unwrap();
             store.record(event("pir1", "bb", 144_000, 20)).unwrap();
             store.record(event("pir2", "aa", 7_200, 1)).unwrap();
-            let mut arc = event("pir2", "cc", 144_000, 20);
-            arc.epoch = Some(231);
-            arc.tags_hex = vec!["t1".into(), "t2".into()];
-            store.record(arc).unwrap();
         }
+        // A line as the ARC-era release wrote it: still replayed and summed.
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{{\"server_id\":\"pir2\",\"nonce_hex\":\"cc\",\"unix_time\":{NOW},\"gas_added\":144000,\"sat_value\":20,\"items_accepted\":1,\"issuer_signature_hex\":\"{}\",\"epoch\":231,\"tags_hex\":[\"t1\",\"t2\"]}}",
+            "00".repeat(64)
+        )
+        .unwrap();
         let store = RedeemStore::open(&path).unwrap();
-        assert!(store.has_tag(231, "t1") && store.has_tag(231, "t2"));
-        assert!(!store.has_tag(232, "t1") && !store.has_tag(231, "t3"));
+        assert_eq!(store.answer("pir2", "cc").unwrap().gas_added, 144_000);
         assert_eq!(store.answer("pir1", "aa").unwrap().gas_added, 72_000);
         assert_eq!(store.answer("pir2", "aa").unwrap().gas_added, 7_200);
         assert!(store.answer("pir2", "bb").is_none());

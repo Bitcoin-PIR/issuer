@@ -17,14 +17,6 @@ mints = ["https://mint.example"]
 # Browser origins allowed by CORS (empty = any origin; no cookies are used).
 cors_origins = ["https://www.bitcoinpir.org", "https://bitcoinpir.org"]
 
-# Credits contract (docs/CREDITS.md in the main repository), published in
-# GET /v2/info and used to turn redeemed sats into gas. Defaults shown.
-[gas]
-credit_sat = 10
-gas_per_credit = 72000
-base_gas_per_frame = 20
-egress_gas_per_mb = 1000
-
 # Operator identity keys (64 hex) whose certified PIR servers may call
 # POST /v2/redeem. Empty refuses every server.
 operator_pubkeys = []
@@ -33,18 +25,13 @@ redeem_max_skew_secs = 300
 # Redemption log (replay index + settlement ledger); default: redeem.jsonl next to store_path.
 # redeem_store_path = "/var/lib/bitcoinpir-issuer/redeem.jsonl"
 
-# ARC credentials (docs/CREDITS.md): one credential = presentation_limit
-# presentations, one credit each. Omit the whole table to sell none.
-[arc]
-# 32-byte master seed from `bpir-issuer arc-seed`; every epoch's issuer keys
-# derive from it. Back it up: it is the credentials.
-seed_path = "/etc/bitcoinpir/issuer/arc.seed"
-epoch_secs = 7776000        # 90 days; credentials are issued under the current epoch
-grace_secs = 2592000        # 30 days after an epoch ends its credentials still spend
-presentation_limit = 100
-[[arc.credential_offers]]   # credits must equal presentation_limit
-credits = 100
-sat = 1000
+# Credits contract (docs/CREDITS.md in the main repository), published in
+# GET /v2/info and used to turn redeemed sats into gas. Defaults shown.
+[gas]
+credit_sat = 10
+gas_per_credit = 72000
+base_gas_per_frame = 20
+egress_gas_per_mb = 1000
 
 # Worst-case prices shown to clients in GET /v2/info (informational). Defaults shown.
 [[rate_card]]
@@ -60,11 +47,11 @@ credits = 2
 flow = "oram_single_address"
 credits = 1
 
-# x402 `exact/lnbtc` (Lightning) purchase rail for `POST /v2/credentials` and
-# `POST /v2/x402/ecash`. Remove the table to turn it off (credentials stay
-# Cashu-only, ecash is not sold). The issuer talks to the
-# node only through `bpir-cln-rpc-guard` (invoice / listinvoices /
-# waitinvoice, bounded parameters); it never opens the node socket.
+# x402 `exact/lnbtc` (Lightning) purchase rail: `POST /v2/x402/ecash` sells
+# Cashu ecash from the issuer's wallet. Remove the table to turn it off. The
+# issuer talks to the node only through `bpir-cln-rpc-guard` (invoice /
+# listinvoices / waitinvoice, bounded parameters); it never opens the node
+# socket.
 # [x402]
 # guard_socket = "/run/bpir-cln-rpc-guard/rpc.sock"
 # # The receiver node's compressed public key; every invoice must be signed by it.

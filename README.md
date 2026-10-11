@@ -1,48 +1,52 @@
 # BitcoinPIR issuer
 
-The credit issuer for BitcoinPIR paid queries. A browser (or any client)
-buys an ARC credential for a `cashuB…` token and spends it one credit at a
-time on any PIR server; each server forwards what it was shown to the
-issuer, which verifies it, rejects double spends, and settles with that
-server in gas.
+The credit issuer for BitcoinPIR paid queries. Cashu ecash is the only
+credit. The issuer keeps a Cashu wallet at the mint; a client presents a
+`cashuB…` token to any PIR server, the server forwards it to the issuer
+(`POST /v2/redeem`), and the issuer swaps it into that wallet and books
+its value to the server's settlement ledger in gas. The issuer also sells
+ecash from the wallet for Lightning (x402 `exact/lnbtc`,
+`POST /v2/x402/ecash`).
 
 The contract this service implements is "Issuer API" in
 [`docs/CREDITS.md`](https://github.com/Bitcoin-PIR/Bitcoin-PIR/blob/main/docs/CREDITS.md)
 in the main repository. Its types (`pir-credit`) are consumed from that
 repository by git revision, so issuer and servers can never disagree on
-the bytes. The v1 session grants (`/v1/info`, `/v1/grants`) are retired.
+the bytes. The v1 session grants (`/v1/info`, `/v1/grants`) are retired,
+and so are the ARC credentials (`POST /v2/credentials`, presentation
+kind 2): `/v2/redeem` refuses kind 2 with `400 unsupported_kind`, a config
+that still has an `[arc]` table fails to load, and `arc.seed` is no longer
+read (keeping or deleting the file is the operator's call).
 
 ## What it does
 
 | Endpoint | Behaviour |
 | --- | --- |
-| `GET /v2/info` | the credits contract ([`docs/CREDITS.md`](https://github.com/Bitcoin-PIR/Bitcoin-PIR/blob/main/docs/CREDITS.md)): `credit_sat`, `gas_per_credit`, `base_gas_per_frame`, `egress_gas_per_mb`, `mints`, sat-priced `offers`, `rate_card` |
-| `POST /v2/credentials` | pay one listed pack (`credits` = the presentation limit, `sat`) with a Cashu token and a blinded `arc::CredentialRequest`; the issuer swaps the token at the mint through a [cdk](https://crates.io/crates/cdk) wallet, blind-issues an ARC credential under the current epoch's key, and answers `CredentialResponseV2` (idempotent per token and request) |
-| `POST /v2/redeem` | a PIR server forwards what a client presented (`RedeemRequestV1`, signed by the server's identity key and carrying its operator-signed certificate); the issuer verifies each item — a Cashu token is swapped at the mint (`gas_added = sats × gas_per_credit / credit_sat`), ARC presentations are verified under their epoch's key with a global tag set per epoch (`gas_per_credit` each, `402 double_spend` on reuse, `402 expired_epoch` outside the epoch or its grace) — books the value to that server, and answers `RedeemResponseV1` signed by the same key servers pin |
+| `GET /v2/info` | the credits contract ([`docs/CREDITS.md`](https://github.com/Bitcoin-PIR/Bitcoin-PIR/blob/main/docs/CREDITS.md)): `credit_sat`, `gas_per_credit`, `base_gas_per_frame`, `egress_gas_per_mb`, `mints`, `rate_card`; `offers` is empty (nothing is sold up front) |
+| `POST /v2/redeem` | a PIR server forwards what a client presented (`RedeemRequestV1`, signed by the server's identity key and carrying its operator-signed certificate); the issuer swaps each Cashu token (kind 1) into its wallet at the mint through a [cdk](https://crates.io/crates/cdk) wallet (`gas_added = sats × gas_per_credit / credit_sat`), books the value to that server, and answers `RedeemResponseV1` signed by the same key servers pin |
+| `POST /v2/x402/ecash` | with an `[x402]` table: sells Cashu ecash from the wallet for a Lightning payment (below); `GET /v2/x402/invoices/{payment_hash}` reports the state of a challenge invoice |
 | `GET /healthz` | `ok` |
 
 Rules that matter:
 
-- **Never credit without money.** A credential is issued and a redemption
-  booked only after the mint accepted the swap; a token the mint refuses
+- **Never credit without money.** A redemption is booked only after the
+  mint accepted the swap; a token the mint refuses
   gets `402 token_rejected`, a mint that cannot be reached gets
   `503 mint_unavailable` and the token stays spendable.
 - **Idempotent per token.** The idempotency key is derived from the token's
-  proof secrets; a token is spent at most once across all paths, and a
-  repeated credential request for the same token and blinded request
-  returns the same answer without consulting the mint.
+  proof secrets; a token is spent at most once across all paths.
 - **Honest about the unknown.** If the process dies (or the mint times out)
   after the swap request was sent, the token is left in a `pending` state
   and logged at error level for manual reconciliation.
 - **No secrets on the PIR hosts.** The issuer is the only component that
-  holds the issuer signing seed, the ARC master seed, and the wallet seed.
+  holds the issuer signing seed and the wallet seed.
   Servers pin the issuer public key with `--credit-issuer-pubkey`.
 - **Redeem is authenticated and replay-safe.** Only servers certified by an
   operator key in `operator_pubkeys` may redeem; `server_id` must match the
   certificate; a repeated `(server_id, nonce)` returns the stored signed
   answer without touching the mint; a token that already bought something
-  (a credential, or a v1 grant before the retirement) or was redeemed once
-  answers `402 already_redeemed`. Every redemption is
+  (an ARC credential or a v1 grant, before their retirement) or was
+  redeemed once answers `402 already_redeemed`. Every redemption is
   appended to `redeem.jsonl`, the per-server settlement ledger
   (`bpir-issuer settlement --config …`).
 
@@ -66,13 +70,12 @@ bpir-issuer keygen --out /etc/bitcoinpir/issuer/grant.key      # issuer seed; pr
 bpir-issuer wallet-seed --out /etc/bitcoinpir/issuer/wallet.seed
 
 # config
-cp config.example.toml /etc/bitcoinpir/issuer/config.toml       # edit mints, CORS, operator keys, [arc] packs
+cp config.example.toml /etc/bitcoinpir/issuer/config.toml       # edit mints, CORS, operator keys, [x402]
 
 # run
 bpir-issuer serve --config /etc/bitcoinpir/issuer/config.toml
 bpir-issuer balance --config /etc/bitcoinpir/issuer/config.toml   # ecash held per (mint, unit)
 bpir-issuer settlement --config /etc/bitcoinpir/issuer/config.toml # gas and sat redeemed per PIR server
-bpir-issuer arc-seed --out /etc/bitcoinpir/issuer/arc.seed        # ARC master seed (per-epoch issuer keys)
 bpir-issuer pubkey --key /etc/bitcoinpir/issuer/grant.key
 bpir-issuer mnemonic --out /etc/bitcoinpir/mint/seed         # BIP39 phrase for a cdk-mintd --seed-file (mode 0400)
 ```
@@ -98,7 +101,6 @@ servers' identity certificates, or `POST /v2/redeem` refuses them.
 | File | Contents | Backup |
 | --- | --- | --- |
 | `grant.key` | 32-byte Ed25519 issuer seed (signs redeem answers) | yes — rotating it means re-pinning every server |
-| `arc.seed` | 32-byte ARC master seed | yes — it is the credentials |
 | `wallet.seed` | 64-byte Cashu wallet seed | yes — with the mint, it recovers the ecash |
 | `wallet.sqlite` | proofs the issuer holds (cdk wallet store) | yes |
 | `grants.jsonl` | append-only log: every token seen, what it bought, every failure (the name predates credits) | yes — it is the idempotency store and the reconciliation record |
@@ -111,20 +113,20 @@ command; the issuer itself never pays out.
 ### Fees
 
 A mint may deduct input fees on the swap, so the amount credited can be
-below the token's face value. The issuer validates the **face value**
-against the pack and absorbs the fee; the credited amount is recorded in
-`grants.jsonl`.
+below the token's face value. `/v2/redeem` books what the mint actually
+credited (recorded in `grants.jsonl`); an ecash sale spends `sat` plus the
+input fee of its inputs, and the issuer absorbs that fee.
 
 ## x402 `exact/lnbtc` (Lightning) purchase rail
 
-With a `[x402]` table (`config.example.toml`), `POST /v2/credentials` also
+With a `[x402]` table (`config.example.toml`), `POST /v2/x402/ecash`
 accepts the x402 flow (x402-foundation/x402
 `specs/schemes/exact/scheme_exact_lnbtc.md`, merged 2026-09-23; HTTP
 transport `specs/transports-v2/http.md`):
 
-1. A body without a `token` (`{ "credits", "sat", "request_hex" }`) and
-   without `PAYMENT-SIGNATURE` is answered `402` with `PAYMENT-REQUIRED`
-   (base64 `PaymentRequired`, also the JSON body): scheme `exact`, network
+1. A request without `PAYMENT-SIGNATURE` is answered `402` with
+   `PAYMENT-REQUIRED` (base64 `PaymentRequired`, also the JSON body):
+   scheme `exact`, network
    `lnbtc:000000000019d6689c085ae165831e93`, `amount` in millisatoshi,
    `payTo` = the node key, `extra.invoice` = a fresh BOLT11 whose description
    hash is the `http:1` request hash (JCS of method, URL, body hash, and the
@@ -136,7 +138,7 @@ transport `specs/transports-v2/http.md`):
    `payTo`, description hash = request hash, preimage = payment hash,
    paid-but-expired window), records `x402:<network>:<payment_hash>` in the
    store (its replay entry: a second claim is `duplicate_settlement`, an
-   identical retry replays the answer), and issues the ARC credential with
+   identical retry replays the answer), and answers with
    `PAYMENT-RESPONSE` (`transaction` = payment hash, no `payer`).
 3. A human can pay the same invoice from a phone: `GET
    /v2/x402/invoices/{payment_hash}` reports `unpaid` / `paid` / `expired`
@@ -145,11 +147,11 @@ transport `specs/transports-v2/http.md`):
 
 Fresh invoices are limited per client address and globally. Money lands in
 the node's channel balance (not in the Cashu wallet); `bpir-issuer
-settlement` is unaffected. The web client still uses the Cashu flow.
+settlement` is unaffected.
 
 ### Ecash: `POST /v2/x402/ecash`
 
-The same rail sells plain Cashu ecash from the issuer's wallet (first mint
+The rail sells plain Cashu ecash from the issuer's wallet (first mint
 in `mints`). The body is `{"sat": 1000, "outputs": [{"amount": 8, "id":
 "<keyset id>", "B_": "<66 hex>"}, …]}`: 1 to 256 NUT-00 blinded outputs of
 the mint's active `sat` keyset, powers of two it signs, distinct `B_`,
@@ -202,7 +204,6 @@ src/config.rs   TOML config and validation, seed-file reader
 src/cashu.rs    token summary, idempotency key, Swapper trait, cdk implementation
 src/ecash.rs    x402 ecash sale: request checks, EcashSeller trait, cdk implementation
 src/issuer_key.rs  the Ed25519 key that signs redeem answers
-src/arc.rs      ARC credential issuance and presentation verification
 src/redeem.rs   POST /v2/redeem verification, replay index, settlement ledger
 src/store.rs    JSON-lines idempotency/audit store
 src/api.rs      axum router, handlers, contract error codes

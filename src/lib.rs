@@ -1,17 +1,16 @@
-//! BitcoinPIR issuer: the credit issuer. It sells ARC credentials for
-//! Cashu ecash (`POST /v2/credentials`), sells Cashu ecash for Lightning
-//! (`POST /v2/x402/ecash`, [`ecash`]), verifies every presentation a PIR
-//! server forwards (`POST /v2/redeem`, answers signed with the
-//! [`issuer_key`]), and settles with each server in gas.
+//! BitcoinPIR issuer: the credit issuer. Cashu ecash is the only credit. It
+//! keeps a Cashu wallet at the mint, swaps into it the ecash a PIR server
+//! forwards (`POST /v2/redeem`, answers signed with the [`issuer_key`]),
+//! books the value to that server's settlement ledger in gas, and sells
+//! ecash from the wallet for Lightning (`POST /v2/x402/ecash`, [`ecash`]).
 //!
 //! The HTTP contract is `docs/CREDITS.md` "Issuer API" in the
 //! Bitcoin-PIR/Bitcoin-PIR repository; its types are the `pir-credit` crate
 //! from the same repository, pinned here by git revision so the issuer and
 //! the PIR servers can never disagree on the bytes. The v1 session grants
-//! (`/v1/`) are retired.
+//! (`/v1/`) and the ARC credentials are retired.
 
 pub mod api;
-pub mod arc;
 pub mod cashu;
 pub mod config;
 pub mod ecash;

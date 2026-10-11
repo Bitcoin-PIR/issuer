@@ -7,7 +7,7 @@ name = "bpir-issuer"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bitcoin PIR contributors"]
-description = "BitcoinPIR issuer: sells ARC and Cashu credits for PIR servers (docs/ISSUER_API.md in Bitcoin-PIR/Bitcoin-PIR)"
+description = "BitcoinPIR issuer: Cashu ecash credits for PIR servers (docs/CREDITS.md in Bitcoin-PIR/Bitcoin-PIR)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Bitcoin-PIR/issuer"
 publish = false
@@ -22,12 +22,6 @@ path = "src/main.rs"
 # same revision the PIR servers build from.
 pir-credit = { git = "https://github.com/Bitcoin-PIR/Bitcoin-PIR.git", rev = "1174240b7e5be1f4ac2797ec4169aabcbee04a5b" }
 pir-identity = { git = "https://github.com/Bitcoin-PIR/Bitcoin-PIR.git", rev = "1174240b7e5be1f4ac2797ec4169aabcbee04a5b" }
-# ARC (anonymous rate-limited credentials, draft-01 over P-256): issuance
-# and presentation verification for credits (docs/CREDITS.md).
-arc = { git = "https://github.com/Bitcoin-PIR/arc.git", rev = "de6c1709eee0faa32985d5a452be11904ee95de4" }
-# Per-epoch ARC issuer keys are derived from one master seed.
-hkdf = "0.12"
-rand_core = { version = "0.6", features = ["getrandom"] }
 # Verifies server identity certificates and request signatures; signs
 # redeem answers.
 ed25519-dalek = "2"

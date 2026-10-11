@@ -1,6 +1,6 @@
-//! HTTP layer: `GET /v2/info`, `POST /v2/credentials` and `POST /v2/redeem`
-//! as `docs/CREDITS.md` specifies, the x402 ecash sale `POST /v2/x402/ecash`,
-//! plus `GET /healthz` for the process supervisor.
+//! HTTP layer: `GET /v2/info` and `POST /v2/redeem` as `docs/CREDITS.md`
+//! specifies, the x402 ecash sale `POST /v2/x402/ecash`, plus `GET /healthz`
+//! for the process supervisor.
 
 use std::sync::Arc;
 
@@ -10,20 +10,17 @@ use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode}
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 
 use ed25519_dalek::VerifyingKey;
-use pir_credit::arc::{decode_presentations, CredentialRequestV2, CredentialResponseV2};
 use pir_credit::issuer::{
-    IssuerInfoV2, OfferV2, RateCardEntryV2, RedeemRequestV1, RedeemResponseV1,
-    CREDIT_PRESENT_KIND_ARC, CREDIT_PRESENT_KIND_CASHU, ISSUER_API_VERSION,
+    IssuerInfoV2, RateCardEntryV2, RedeemRequestV1, RedeemResponseV1, CREDIT_PRESENT_KIND_ARC,
+    CREDIT_PRESENT_KIND_CASHU, ISSUER_API_VERSION,
 };
-
-use crate::arc::{ArcError, ArcIssuer};
 
 use crate::cashu::{token_key, SwapError, Swapper, TokenSummary};
 use crate::config::Config;
@@ -32,7 +29,7 @@ use crate::issuer_key::IssuerKey;
 use crate::redeem::{verify_request, RedeemEvent, RedeemStore};
 use crate::store::{State as TokenState, Store};
 use crate::x402::facilitator::Settled;
-use crate::x402::server::{BoundRequest, ChallengeError, X402State, CREDENTIALS_PATH, ECASH_PATH};
+use crate::x402::server::{BoundRequest, ChallengeError, X402State, ECASH_PATH};
 use crate::x402::{self, header_value, parse_header, PaymentPayload, SettlementResponse};
 
 /// x402 HTTP transport headers (`specs/transports-v2/http.md`).
@@ -61,11 +58,9 @@ pub struct AppState {
     /// Operator keys whose certified servers may redeem (from
     /// `operator_pubkeys`).
     pub operator_keys: Vec<VerifyingKey>,
-    /// x402 `exact/lnbtc` purchase rail; `None` keeps `POST /v2/credentials`
-    /// Cashu-only.
+    /// x402 `exact/lnbtc` purchase rail; `None` keeps `POST /v2/x402/ecash`
+    /// off.
     pub x402: Option<X402State>,
-    /// ARC issuer (`[arc]`), `None` when credentials are not sold.
-    pub arc: Option<ArcIssuer>,
     pub clock: Box<dyn Fn() -> u64 + Send + Sync>,
 }
 
@@ -131,33 +126,11 @@ impl ApiError {
     pub fn already_redeemed(message: impl Into<String>) -> Self {
         Self::new(StatusCode::PAYMENT_REQUIRED, "already_redeemed", message)
     }
-    pub fn expired_epoch(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::PAYMENT_REQUIRED, "expired_epoch", message)
-    }
-    pub fn invalid_presentation(message: impl Into<String>) -> Self {
-        Self::new(
-            StatusCode::PAYMENT_REQUIRED,
-            "invalid_presentation",
-            message,
-        )
-    }
-    pub fn double_spend(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::PAYMENT_REQUIRED, "double_spend", message)
-    }
     pub fn float_exhausted(message: impl Into<String>) -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "float_exhausted", message)
     }
     pub fn retry(message: impl Into<String>) -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "retry", message)
-    }
-}
-
-impl From<ArcError> for ApiError {
-    fn from(error: ArcError) -> Self {
-        match error {
-            ArcError::Malformed(..) => ApiError::invalid_request(error.to_string()),
-            ArcError::Invalid(..) => ApiError::invalid_presentation(error.to_string()),
-        }
     }
 }
 
@@ -188,7 +161,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v2/info", get(info_v2))
-        .route("/v2/credentials", post(credentials))
         .route("/v2/x402/ecash", post(x402_ecash))
         .route("/v2/x402/invoices/{payment_hash}", get(x402_invoice_status))
         .route("/v2/redeem", post(redeem))
@@ -197,24 +169,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// `GET /v2/info` (docs/CREDITS.md): the credits contract parameters,
-/// sat-priced offers, and the informational rate card.
+/// `GET /v2/info` (docs/CREDITS.md): the credits contract parameters, the
+/// accepted mints, and the informational rate card. Nothing is sold up
+/// front (Cashu ecash is presented directly), so `offers` is empty.
 async fn info_v2(State(state): State<Arc<AppState>>) -> Json<IssuerInfoV2> {
     let gas = state.config.gas.params();
-    let now = (state.clock)();
-    // Offers are credential packs; without ARC there is nothing to buy up
-    // front (Cashu tokens are presented directly).
-    let offers = match (&state.config.arc, &state.arc) {
-        (Some(config), Some(_)) => config
-            .credential_offers
-            .iter()
-            .map(|offer| OfferV2 {
-                credits: offer.credits,
-                sat: offer.sat,
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
     Json(IssuerInfoV2 {
         service: "bitcoinpir-issuer".to_owned(),
         version: ISSUER_API_VERSION,
@@ -223,8 +182,8 @@ async fn info_v2(State(state): State<Arc<AppState>>) -> Json<IssuerInfoV2> {
         base_gas_per_frame: gas.base_gas_per_frame,
         egress_gas_per_mb: gas.egress_gas_per_mb,
         mints: state.config.mints.clone(),
-        offers,
-        arc: state.arc.as_ref().map(|arc| arc.info(now)),
+        offers: Vec::new(),
+        arc: None,
         rate_card: state
             .config
             .rate_card
@@ -265,8 +224,6 @@ async fn redeem(
     let mut gas_added: u64 = 0;
     let mut sat_value: u64 = 0;
     let mut items_accepted: u32 = 0;
-    let mut consumed_epoch: Option<u32> = None;
-    let mut consumed_tags: Vec<String> = Vec::new();
     for (kind, payload) in &verified.items {
         match *kind {
             CREDIT_PRESENT_KIND_CASHU => {
@@ -377,40 +334,9 @@ async fn redeem(
                 items_accepted += 1;
             }
             CREDIT_PRESENT_KIND_ARC => {
-                let Some(arc) = state.arc.as_ref() else {
-                    return Err(ApiError::unsupported_kind(
-                        "this issuer does not issue ARC credentials",
-                    ));
-                };
-                let (epoch, presentations) =
-                    decode_presentations(payload).map_err(ApiError::invalid_request)?;
-                if !arc.accepts(epoch, now) {
-                    return Err(ApiError::expired_epoch(format!(
-                        "ARC epoch {epoch} is not accepted (current {})",
-                        arc.current_epoch(now)
-                    )));
-                }
-                match consumed_epoch {
-                    None => consumed_epoch = Some(epoch),
-                    Some(previous) if previous != epoch => {
-                        return Err(ApiError::invalid_request(
-                            "one redeem request may carry presentations of one epoch only",
-                        ));
-                    }
-                    Some(_) => {}
-                }
-                for presentation in presentations {
-                    let tag = arc.verify(epoch, presentation)?;
-                    if consumed_tags.contains(&tag) || redeem_store.has_tag(epoch, &tag) {
-                        return Err(ApiError::double_spend(
-                            "an ARC presentation in this request was already spent",
-                        ));
-                    }
-                    consumed_tags.push(tag);
-                    gas_added = gas_added.saturating_add(gas.gas_per_credit);
-                    sat_value = sat_value.saturating_add(gas.credit_sat);
-                }
-                items_accepted += 1;
+                return Err(ApiError::unsupported_kind(
+                    "ARC credentials are retired; present Cashu ecash (kind 1)",
+                ));
             }
             other => {
                 return Err(ApiError::invalid_request(format!(
@@ -431,8 +357,6 @@ async fn redeem(
         sat_value,
         items_accepted,
         issuer_signature_hex,
-        epoch: consumed_epoch,
-        tags_hex: consumed_tags,
     };
     let answer = event.response();
     redeem_store
@@ -440,319 +364,6 @@ async fn redeem(
         .map_err(|e| ApiError::internal(format!("redeem store: {e}")))?;
     tracing::info!(server_id = %verified.server_id, gas_added, sat_value, items_accepted, "redeemed");
     Ok(Json(answer))
-}
-
-/// `POST /v2/credentials` (docs/CREDITS.md): pay one listed pack with a
-/// Cashu token and receive a blind-issued ARC credential under the current
-/// epoch. Idempotent per token: the same token with the same request
-/// replays the stored response; with another request it is refused, so a
-/// client must persist its request and secrets before sending.
-async fn credentials(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    let value: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|e| ApiError::invalid_request(format!("body: {e}")))?;
-    if value.get("token").is_some() {
-        let request: CredentialRequestV2 = serde_json::from_value(value)
-            .map_err(|e| ApiError::invalid_request(format!("body: {e}")))?;
-        return credentials_cashu(state, request)
-            .await
-            .map(IntoResponse::into_response);
-    }
-    let request: X402CredentialRequest = serde_json::from_value(value)
-        .map_err(|e| ApiError::invalid_request(format!("body: {e}")))?;
-    credentials_x402(state, headers, body, request).await
-}
-
-/// The Cashu purchase: the body carried a `token`.
-async fn credentials_cashu(
-    state: Arc<AppState>,
-    request: CredentialRequestV2,
-) -> Result<Json<CredentialResponseV2>, ApiError> {
-    let (Some(arc_config), Some(arc)) = (&state.config.arc, &state.arc) else {
-        return Err(ApiError::unsupported_kind(
-            "this issuer does not issue ARC credentials",
-        ));
-    };
-    if request.credits != u64::from(arc.presentation_limit())
-        || !arc_config
-            .credential_offers
-            .iter()
-            .any(|offer| offer.credits == request.credits && offer.sat == request.sat)
-    {
-        return Err(ApiError::invalid_request("unknown credential offer"));
-    }
-    let request_bytes = hex::decode(&request.request_hex)
-        .map_err(|_| ApiError::invalid_request("request_hex is not hex"))?;
-    if request_bytes.len() != arc::CredentialRequest::SIZE {
-        return Err(ApiError::invalid_request(format!(
-            "request_hex must encode {} bytes",
-            arc::CredentialRequest::SIZE
-        )));
-    }
-    let request_hex = hex::encode(&request_bytes);
-    let encoded = request.token.trim();
-    let summary =
-        TokenSummary::parse(encoded).map_err(|e| ApiError::invalid_request(e.to_string()))?;
-    if !state.config.accepts_mint(&summary.mint) {
-        return Err(ApiError::mint_not_accepted(format!(
-            "{} is not an accepted mint",
-            summary.mint
-        )));
-    }
-    if summary.unit != "sat" || summary.amount != request.sat {
-        return Err(ApiError::wrong_amount(format!(
-            "token is worth {} {}, offer costs {} sat",
-            summary.amount, summary.unit, request.sat
-        )));
-    }
-    let key_hex = hex::encode(token_key(&summary.secrets));
-    let now = (state.clock)();
-    let epoch = arc.current_epoch(now);
-
-    let mut store = state.store.lock().await;
-    match store.get(&key_hex).cloned() {
-        Some(TokenState::Credentialed {
-            epoch,
-            request_hex: stored_request,
-            response_hex,
-            ..
-        }) => {
-            if stored_request != request_hex {
-                return Err(ApiError::invalid_request(
-                    "this token already bought a credential for another request; the original stands",
-                ));
-            }
-            tracing::info!(epoch, "replaying a credential for a token seen before");
-            return Ok(Json(CredentialResponseV2 {
-                response_hex,
-                epoch,
-                presentation_limit: arc.presentation_limit(),
-                issuer_public_key_hex: arc.public_key_hex(epoch),
-                valid_until: arc.valid_until(epoch),
-            }));
-        }
-        Some(TokenState::Issued { .. }) => {
-            return Err(ApiError::already_redeemed(
-                "this token already bought a session grant",
-            ));
-        }
-        Some(TokenState::Redeemed { server_id, .. }) => {
-            return Err(ApiError::already_redeemed(format!(
-                "this token was already redeemed through {server_id}"
-            )));
-        }
-        Some(
-            TokenState::X402Credentialed { .. }
-            | TokenState::X402EcashPending { .. }
-            | TokenState::X402EcashIssued { .. },
-        ) => {
-            return Err(ApiError::already_redeemed(
-                "this key belongs to an x402 payment",
-            ));
-        }
-        Some(TokenState::Pending { .. }) => {
-            tracing::error!(token_key = %key_hex,
-                "token with an unknown earlier swap outcome presented again; reconcile manually");
-            return Err(ApiError::token_rejected(format!(
-                "an earlier attempt with this token has an unknown outcome (key {key_hex}); contact the operator"
-            )));
-        }
-        Some(TokenState::Failed { .. }) | None => {}
-    }
-    store
-        .record(&key_hex, TokenState::Pending { first_seen: now })
-        .map_err(|e| ApiError::internal(format!("store: {e}")))?;
-    let received = match state.swapper.receive(&summary, encoded).await {
-        Ok(received) => received,
-        Err(SwapError::Rejected(message)) => {
-            store
-                .record(
-                    &key_hex,
-                    TokenState::Failed {
-                        at: now,
-                        reason: message.clone(),
-                    },
-                )
-                .map_err(|e| ApiError::internal(format!("store: {e}")))?;
-            return Err(ApiError::token_rejected(message));
-        }
-        Err(SwapError::Unavailable(message)) => {
-            store
-                .record(
-                    &key_hex,
-                    TokenState::Failed {
-                        at: now,
-                        reason: message.clone(),
-                    },
-                )
-                .map_err(|e| ApiError::internal(format!("store: {e}")))?;
-            return Err(ApiError::mint_unavailable(message));
-        }
-        Err(SwapError::Unknown(message)) => {
-            tracing::warn!(token_key = %key_hex, %message, "swap outcome unknown; keeping pending marker");
-            return Err(ApiError::mint_unavailable(message));
-        }
-    };
-    if received < request.sat {
-        tracing::warn!(token_key = %key_hex, received, face = request.sat, "mint credited less than face value (input fees)");
-    }
-    let response_bytes = arc.issue(epoch, &request_bytes)?;
-    let response_hex = hex::encode(&response_bytes);
-    store
-        .record(
-            &key_hex,
-            TokenState::Credentialed {
-                epoch,
-                request_hex,
-                response_hex: response_hex.clone(),
-                received,
-                mint: summary.mint.clone(),
-                unit: summary.unit.clone(),
-            },
-        )
-        .map_err(|e| ApiError::internal(format!("store: {e}")))?;
-    tracing::info!(epoch, received, mint = %summary.mint, "ARC credential issued");
-    Ok(Json(CredentialResponseV2 {
-        response_hex,
-        epoch,
-        presentation_limit: arc.presentation_limit(),
-        issuer_public_key_hex: arc.public_key_hex(epoch),
-        valid_until: arc.valid_until(epoch),
-    }))
-}
-
-/// `POST /v2/credentials` body without a Cashu token: an x402 purchase of
-/// one pack. The blinded ARC request travels in the same body on the
-/// challenge and on the paid retry; the body bytes are part of the request
-/// binding, so the retry must repeat them exactly.
-#[derive(Deserialize)]
-struct X402CredentialRequest {
-    credits: u64,
-    sat: u64,
-    request_hex: String,
-}
-
-/// x402 `exact/lnbtc` (`crate::x402`): without `PAYMENT-SIGNATURE`, answer
-/// `402` with a fresh request-bound invoice; with it, settle the proof and
-/// issue the credential. One payment buys one credential: a repeat of the
-/// identical request replays the stored answer, another request with the
-/// same payment is `duplicate_settlement`.
-async fn credentials_x402(
-    state: Arc<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-    request: X402CredentialRequest,
-) -> Result<Response, ApiError> {
-    let Some(x) = state.x402.as_ref() else {
-        return Err(ApiError::unsupported_kind(
-            "the body has no Cashu token and x402 is not enabled on this issuer",
-        ));
-    };
-    let (Some(arc_config), Some(arc)) = (&state.config.arc, &state.arc) else {
-        return Err(ApiError::unsupported_kind(
-            "this issuer does not issue ARC credentials",
-        ));
-    };
-    if request.credits != u64::from(arc.presentation_limit())
-        || !arc_config
-            .credential_offers
-            .iter()
-            .any(|offer| offer.credits == request.credits && offer.sat == request.sat)
-    {
-        return Err(ApiError::invalid_request("unknown credential offer"));
-    }
-    let request_bytes = hex::decode(&request.request_hex)
-        .map_err(|_| ApiError::invalid_request("request_hex is not hex"))?;
-    if request_bytes.len() != arc::CredentialRequest::SIZE {
-        return Err(ApiError::invalid_request(format!(
-            "request_hex must encode {} bytes",
-            arc::CredentialRequest::SIZE
-        )));
-    }
-    let request_hex = hex::encode(&request_bytes);
-    let bound = x
-        .bind(CREDENTIALS_PATH, &headers, &body)
-        .map_err(ApiError::invalid_request)?;
-    let now = (state.clock)();
-
-    let Some(signature) = headers.get(&PAYMENT_SIGNATURE) else {
-        let description = format!("BitcoinPIR credential pack: {} credits", request.credits);
-        return x402_challenge(x, &bound, description, request.sat, now, &headers).await;
-    };
-    let payload = payment_payload(signature)?;
-    let network = x.network.caip2();
-    let settled = match x.settle(&bound, request.sat, &payload, now) {
-        Ok(settled) => settled,
-        Err(reason) => {
-            tracing::info!(reason, "x402: settlement refused");
-            return Ok(payment_failed(network, reason));
-        }
-    };
-    let epoch = arc.current_epoch(now);
-    let key = format!("x402:{}", settled.replay_key);
-    let mut store = state.store.lock().await;
-    match store.get(&key).cloned() {
-        Some(TokenState::X402Credentialed {
-            request_hex: stored_request,
-            response_hex,
-            epoch,
-            ..
-        }) => {
-            if stored_request != request_hex {
-                return Ok(payment_failed(network, "duplicate_settlement"));
-            }
-            tracing::info!(
-                epoch,
-                "x402: replaying a credential for a payment seen before"
-            );
-            return Ok(credential_response(arc, epoch, response_hex, &settled));
-        }
-        Some(_) => return Ok(payment_failed(network, "duplicate_settlement")),
-        None => {}
-    }
-    let response_bytes = arc.issue(epoch, &request_bytes)?;
-    let response_hex = hex::encode(&response_bytes);
-    store
-        .record(
-            &key,
-            TokenState::X402Credentialed {
-                network: network.to_owned(),
-                payment_hash_hex: settled.payment_hash_hex.clone(),
-                msat: settled.amount_msat,
-                epoch,
-                request_hex,
-                response_hex: response_hex.clone(),
-            },
-        )
-        .map_err(|e| ApiError::internal(format!("store: {e}")))?;
-    tracing::info!(
-        epoch,
-        msat = settled.amount_msat,
-        payment_hash = %settled.payment_hash_hex,
-        "x402: ARC credential issued"
-    );
-    Ok(credential_response(arc, epoch, response_hex, &settled))
-}
-
-fn credential_response(
-    arc: &ArcIssuer,
-    epoch: u32,
-    response_hex: String,
-    settled: &Settled,
-) -> Response {
-    paid(
-        settled,
-        CredentialResponseV2 {
-            response_hex,
-            epoch,
-            presentation_limit: arc.presentation_limit(),
-            issuer_public_key_hex: arc.public_key_hex(epoch),
-            valid_until: arc.valid_until(epoch),
-        },
-    )
 }
 
 /// `POST /v2/x402/ecash` answer: the mint's blind signatures on the request's

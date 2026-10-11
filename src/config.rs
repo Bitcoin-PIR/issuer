@@ -48,12 +48,8 @@ pub struct Config {
     /// (informational; the servers meter gas).
     #[serde(default = "default_rate_card")]
     pub rate_card: Vec<RateCardEntry>,
-    /// ARC credentials (`docs/CREDITS.md`). Absent keeps `POST /v2/credentials`
-    /// and ARC items of `POST /v2/redeem` refused.
-    #[serde(default)]
-    pub arc: Option<ArcConfig>,
-    /// x402 `exact/lnbtc` purchase rail. Absent keeps `POST /v2/credentials`
-    /// Cashu-only.
+    /// x402 `exact/lnbtc` purchase rail. Absent keeps `POST /v2/x402/ecash`
+    /// off.
     #[serde(default)]
     pub x402: Option<X402Config>,
 }
@@ -134,54 +130,6 @@ fn default_x402_ecash_min_sat() -> u64 {
 
 fn default_x402_ecash_max_sat() -> u64 {
     20_000
-}
-
-/// The `[arc]` table.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArcConfig {
-    /// 32-byte master seed (raw, or 64 hex characters) from
-    /// `bpir-issuer arc-seed`; every epoch's issuer keys derive from it.
-    pub seed_path: PathBuf,
-    #[serde(default = "default_arc_epoch_secs")]
-    pub epoch_secs: u64,
-    #[serde(default = "default_arc_grace_secs")]
-    pub grace_secs: u64,
-    /// Presentations per credential (one credit each).
-    #[serde(default = "default_arc_limit")]
-    pub presentation_limit: u32,
-    /// Packs on sale at `POST /v2/credentials`; `credits` must equal
-    /// `presentation_limit` (one credential per pack).
-    #[serde(default = "default_credential_offers")]
-    pub credential_offers: Vec<CredentialOffer>,
-}
-
-/// One `[[arc.credential_offers]]` line.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialOffer {
-    pub credits: u64,
-    pub sat: u64,
-}
-
-fn default_arc_epoch_secs() -> u64 {
-    pir_credit::arc::ARC_EPOCH_SECS
-}
-
-fn default_arc_grace_secs() -> u64 {
-    pir_credit::arc::ARC_GRACE_SECS
-}
-
-fn default_arc_limit() -> u32 {
-    pir_credit::arc::ARC_PRESENTATION_LIMIT
-}
-
-fn default_credential_offers() -> Vec<CredentialOffer> {
-    vec![CredentialOffer {
-        credits: u64::from(pir_credit::arc::ARC_PRESENTATION_LIMIT),
-        sat: u64::from(pir_credit::arc::ARC_PRESENTATION_LIMIT)
-            * pir_credit::GasParams::PRODUCTION_2026_09.credit_sat,
-    }]
 }
 
 /// The `[gas]` table: `pir_credit::GasParams` with the 2026-09 defaults.
@@ -329,36 +277,6 @@ impl Config {
                 )));
             }
         }
-        if let Some(arc) = &self.arc {
-            if arc.epoch_secs < 86_400 {
-                return Err(ConfigError::Invalid(
-                    "arc.epoch_secs must be at least one day".into(),
-                ));
-            }
-            if arc.grace_secs > arc.epoch_secs {
-                return Err(ConfigError::Invalid(
-                    "arc.grace_secs must not exceed arc.epoch_secs".into(),
-                ));
-            }
-            if !(2..=4096).contains(&arc.presentation_limit) {
-                return Err(ConfigError::Invalid(
-                    "arc.presentation_limit must be 2..=4096".into(),
-                ));
-            }
-            if arc.credential_offers.is_empty() {
-                return Err(ConfigError::Invalid(
-                    "arc.credential_offers must list at least one pack".into(),
-                ));
-            }
-            for offer in &arc.credential_offers {
-                if offer.credits != u64::from(arc.presentation_limit) || offer.sat == 0 {
-                    return Err(ConfigError::Invalid(format!(
-                        "arc credential offer must sell exactly {} credits for a positive price: {offer:?}",
-                        arc.presentation_limit
-                    )));
-                }
-            }
-        }
         for origin in &self.cors_origins {
             if !(origin.starts_with("https://") || origin.starts_with("http://localhost")) {
                 return Err(ConfigError::Invalid(format!(
@@ -474,6 +392,43 @@ mod tests {
                 "#
             );
             assert!(toml::from_str::<Config>(&text).is_err(), "{retired}");
+        }
+    }
+
+    #[test]
+    fn example_config_loads() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        Config::load(&path).unwrap();
+    }
+
+    #[test]
+    fn retired_arc_table_is_refused() {
+        // ARC credentials are retired: the config loads once `[arc]` and
+        // `[[arc.credential_offers]]` are deleted, and fails loudly at
+        // startup while either is still there.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let base = r#"
+            listen = "127.0.0.1:8095"
+            grant_key_path = "grant.key"
+            wallet_seed_path = "wallet.seed"
+            wallet_db_path = "wallet.sqlite"
+            store_path = "grants.jsonl"
+            mints = ["https://mint.example"]
+            "#;
+        std::fs::write(&path, base).unwrap();
+        Config::load(&path).unwrap();
+        for retired in [
+            "[arc]\nseed_path = \"arc.seed\"\npresentation_limit = 100",
+            "[[arc.credential_offers]]\ncredits = 100\nsat = 1000",
+        ] {
+            std::fs::write(&path, format!("{base}\n{retired}\n")).unwrap();
+            match Config::load(&path) {
+                Err(ConfigError::Parse(_, e)) => {
+                    assert!(e.to_string().contains("unknown field `arc`"), "{e}")
+                }
+                other => panic!("{retired}: {other:?}"),
+            }
         }
     }
 
